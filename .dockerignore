@@ -1,0 +1,29 @@
+# Node
+**/node_modules
+plugin/dist
+
+# Python
+.venv
+**/__pycache__
+
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Fly
+fly.toml
+
+# Claude
+.claude
+
+# Build artifacts
+*.log
