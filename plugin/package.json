@@ -1,0 +1,50 @@
+{
+  "name": "@mnemom/smoltbot",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for AAP (Agent Activity Protocol) trace collection",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "bin": {
+    "smoltbot": "./dist/bin/smoltbot.js"
+  },
+  "files": [
+    "dist",
+    "hooks",
+    "openclaw.plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc && npm run copy-hooks",
+    "copy-hooks": "cp hooks/before-tool-call/HOOK.md dist/hooks/before-tool-call/ && cp hooks/after-tool-call/HOOK.md dist/hooks/after-tool-call/",
+    "prepublishOnly": "npm run build",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "aap",
+    "agent",
+    "tracing",
+    "observability"
+  ],
+  "author": "Mnemom",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mnemom/smoltbot.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^9.0.0",
+    "typescript": "^5.3.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=0.1.0"
+  }
+}
