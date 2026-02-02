@@ -1,0 +1,51 @@
+{
+  "name": "@mnemom/smoltbot",
+  "version": "0.1.0",
+  "description": "AAP trace collection plugin for agent observability",
+  "entry": "dist/src/index.js",
+  "hooks": "dist/hooks",
+  "config": {
+    "apiUrl": {
+      "type": "string",
+      "description": "Supabase project URL (e.g., https://xyz.supabase.co)",
+      "env": "SMOLTBOT_API_URL",
+      "required": true
+    },
+    "apiKey": {
+      "type": "string",
+      "description": "Supabase service_role key for write access",
+      "env": "SMOLTBOT_API_KEY",
+      "sensitive": true,
+      "required": true
+    },
+    "agentId": {
+      "type": "string",
+      "description": "Unique agent identifier (generated via smoltbot init)",
+      "configFile": "~/.smoltbot/config.json",
+      "configKey": "agentId",
+      "required": true
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Enable or disable trace collection",
+      "env": "SMOLTBOT_ENABLED",
+      "default": true
+    },
+    "batchSize": {
+      "type": "number",
+      "description": "Number of traces to batch before sending",
+      "env": "SMOLTBOT_BATCH_SIZE",
+      "default": 1
+    },
+    "timeout": {
+      "type": "number",
+      "description": "API request timeout in milliseconds",
+      "env": "SMOLTBOT_TIMEOUT",
+      "default": 5000
+    }
+  },
+  "permissions": {
+    "network": ["${config.apiUrl}"],
+    "filesystem": ["~/.smoltbot/"]
+  }
+}
