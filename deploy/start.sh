@@ -17,12 +17,17 @@ else
   echo "Warning: TAILSCALE_AUTHKEY not set, skipping Tailscale setup"
 fi
 
-# Run the rest as smoltbot user (preserve environment with -m)
-exec su -m smoltbot -c '
+# Export env vars that need to pass through to smoltbot user
+export SMOLTBOT_API_URL SMOLTBOT_API_KEY SMOLTBOT_ENABLED SMOLTBOT_BATCH_SIZE
+export ANTHROPIC_API_KEY OPENCLAW_GATEWAY_TOKEN
+
+# Run the rest as smoltbot user with proper HOME
+exec runuser -u smoltbot -- /bin/bash -c '
 set -e
+cd /home/smoltbot
 
 # Initialize smoltbot if not already done
-if [ ! -f ~/.smoltbot/config.json ]; then
+if [ ! -f /home/smoltbot/.smoltbot/config.json ]; then
   echo "Initializing smoltbot..."
   cd /home/smoltbot/plugin && node dist/bin/smoltbot.js init
 fi
@@ -36,9 +41,6 @@ echo "Validating OpenClaw configuration..."
 openclaw doctor || true
 
 # Start OpenClaw gateway
-# --bind lan: Binds to 0.0.0.0 so Fly proxy can reach the gateway
-# OPENCLAW_GATEWAY_TOKEN is read from environment (set via fly secrets)
-# See https://docs.openclaw.ai/platforms/fly
 echo "Starting OpenClaw gateway on port 18789 (bind: lan)..."
 cd /usr/local/lib/node_modules/openclaw
 exec node dist/index.js gateway --allow-unconfigured --port 18789 --bind lan
