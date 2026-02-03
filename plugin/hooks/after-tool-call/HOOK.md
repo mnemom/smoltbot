@@ -7,9 +7,6 @@ metadata:
     events:
       - after_tool_call
     requires:
-      env:
-        - SMOLTBOT_API_URL
-        - SMOLTBOT_API_KEY
       config:
         - ~/.smoltbot/config.json
 ---
@@ -22,7 +19,7 @@ This hook runs after tool execution to:
 2. Calculate execution duration
 3. Attach result or error information
 4. Construct final AAP trace
-5. Submit to Supabase API
+5. Submit to trace API
 
 ## Error Handling
 
