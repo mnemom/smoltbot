@@ -7,9 +7,6 @@ metadata:
     events:
       - before_tool_call
     requires:
-      env:
-        - SMOLTBOT_API_URL
-        - SMOLTBOT_API_KEY
       config:
         - ~/.smoltbot/config.json
 ---
@@ -27,9 +24,7 @@ This hook intercepts tool calls before execution to:
 
 Requires `smoltbot init` to be run first, which creates `~/.smoltbot/config.json` with the agent ID.
 
-Environment variables:
-- `SMOLTBOT_API_URL` - Supabase project URL
-- `SMOLTBOT_API_KEY` - Supabase service_role key
+No API keys needed - traces are sent to the smoltbot proxy automatically.
 
 ## Trace Flow
 
