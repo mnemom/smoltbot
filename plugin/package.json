@@ -46,5 +46,8 @@
   },
   "peerDependencies": {
     "openclaw": ">=0.1.0"
+  },
+  "openclaw": {
+    "extensions": ["./dist/src/index.js"]
   }
 }

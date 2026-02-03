@@ -1,52 +1,57 @@
 -- Smoltbot Row Level Security (RLS) Policies
 --
--- Security model:
--- - Public read: Anyone can view traces (transparency is the point)
--- - Authenticated write: Only requests with service_role key can insert
+-- Security Model (Proxy Architecture):
+-- ┌─────────────────────────────────────────────────────────────────────┐
+-- │  Plugin (client)  →  Proxy API  →  Supabase (service_role)         │
+-- │                                                                     │
+-- │  - Plugin has NO database credentials                               │
+-- │  - Proxy validates, rate-limits, then writes with service_role     │
+-- │  - service_role bypasses RLS (full write access, server-side only) │
+-- │  - Public read access for transparency (the whole point)           │
+-- └─────────────────────────────────────────────────────────────────────┘
 --
--- This ensures the dashboard is publicly accessible while preventing
--- unauthorized writes to the traces table.
+-- This design allows us to:
+-- - Swap databases without client changes
+-- - Add rate limiting, validation at the proxy layer
+-- - Keep write credentials server-side only
+-- - Scale the proxy independently
 
 -- Enable RLS on the traces table
 ALTER TABLE traces ENABLE ROW LEVEL SECURITY;
 
--- Policy: Allow anyone to read traces (including anonymous users)
--- This makes the dashboard publicly viewable without authentication
-CREATE POLICY "Public read access for traces"
+-- Policy: Public read access (transparency is the point)
+-- Anyone can view any agent's traces - that's the whole value proposition
+CREATE POLICY "traces_public_read"
   ON traces
   FOR SELECT
   TO public
   USING (true);
 
--- Policy: Only service role can insert traces
--- Agents must use the service_role key (not anon key) to write
-CREATE POLICY "Service role insert access for traces"
+-- Policy: Service role has full write access
+-- Only the proxy API uses this (server-side, never exposed to clients)
+CREATE POLICY "traces_service_write"
   ON traces
   FOR INSERT
   TO service_role
   WITH CHECK (true);
 
--- Policy: Only service role can update traces
--- Updates should be rare, but allow for corrections
-CREATE POLICY "Service role update access for traces"
+-- Policy: Service role can update (rare, for corrections)
+CREATE POLICY "traces_service_update"
   ON traces
   FOR UPDATE
   TO service_role
   USING (true)
   WITH CHECK (true);
 
--- Policy: Only service role can delete traces
--- Deletions should be rare, mainly for cleanup/maintenance
-CREATE POLICY "Service role delete access for traces"
+-- Policy: Service role can delete (maintenance only)
+CREATE POLICY "traces_service_delete"
   ON traces
   FOR DELETE
   TO service_role
   USING (true);
 
--- Note: The 'anon' role (used with anon key) will only have SELECT access
--- The 'service_role' (used with service_role key) has full CRUD access
+-- Note: The anon key (public) can ONLY SELECT
+-- All writes go through the proxy which uses service_role server-side
 --
--- In Supabase:
--- - anon key = public access, subject to RLS policies for 'public' role
--- - service_role key = bypasses RLS entirely, but we define policies anyway
---   for clarity and in case RLS bypass is ever disabled
+-- To verify policies:
+--   SELECT * FROM pg_policies WHERE tablename = 'traces';
