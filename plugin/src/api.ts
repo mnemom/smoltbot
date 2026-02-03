@@ -15,7 +15,7 @@ import type { AAPTrace } from './trace.js';
 /**
  * API endpoint - stable contract that never changes for clients
  */
-const API_ENDPOINT = 'https://api.mnemom.ai/v1/traces';
+const API_ENDPOINT = 'https://smoltbot-api.mnemom.workers.dev/v1/traces';
 
 /**
  * API response for trace submission
