@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenClaw local config (contains secrets)
+openclaw.json
+
+# Logs
+*.log
+logs/
+
+# Local development config (user-specific)
+.claude/
+.foundry/
+.mcp.json
