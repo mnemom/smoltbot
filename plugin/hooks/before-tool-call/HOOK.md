@@ -6,9 +6,6 @@ metadata:
     emoji: "📊"
     events:
       - before_tool_call
-    requires:
-      config:
-        - ~/.smoltbot/config.json
 ---
 
 # Smoltbot Before Tool Call Hook
