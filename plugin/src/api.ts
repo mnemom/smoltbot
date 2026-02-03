@@ -1,5 +1,21 @@
 import type { AAPTrace } from './trace.js';
-import type { SmoltbotConfig } from './config.js';
+
+/**
+ * Smoltbot Trace API
+ *
+ * Architecture:
+ * Plugin → POST https://api.mnemom.ai/v1/traces → [Proxy] → Database
+ *
+ * The proxy layer allows us to:
+ * - Swap databases without client updates
+ * - Add rate limiting, validation, analytics
+ * - Scale independently of storage backend
+ */
+
+/**
+ * API endpoint - stable contract that never changes for clients
+ */
+const API_ENDPOINT = 'https://api.mnemom.ai/v1/traces';
 
 /**
  * API response for trace submission
@@ -27,48 +43,42 @@ let traceQueue: AAPTrace[] = [];
 let flushTimeout: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Current configuration reference
+ * Configuration for batching
  */
-let currentConfig: SmoltbotConfig | null = null;
+interface ApiConfig {
+  batchSize: number;
+  timeout: number;
+}
+
+let currentConfig: ApiConfig = {
+  batchSize: 1,
+  timeout: 5000,
+};
 
 /**
  * Initialize the API client with configuration
  */
-export function initializeApi(config: SmoltbotConfig): void {
-  currentConfig = config;
+export function initializeApi(config: { batchSize?: number; timeout?: number }): void {
+  currentConfig = {
+    batchSize: config.batchSize ?? 1,
+    timeout: config.timeout ?? 5000,
+  };
 }
 
 /**
  * Submit a single trace to the API
  */
-export async function submitTrace(
-  trace: AAPTrace,
-  config: SmoltbotConfig
-): Promise<TraceResponse> {
+export async function submitTrace(trace: AAPTrace): Promise<TraceResponse> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), config.timeout);
+    const timeoutId = setTimeout(() => controller.abort(), currentConfig.timeout);
 
-    // Supabase REST API format
-    const response = await fetch(`${config.apiUrl}/rest/v1/traces`, {
+    const response = await fetch(API_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'apikey': config.apiKey,
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Prefer': 'return=minimal',
       },
-      body: JSON.stringify({
-        id: trace.id,
-        agent_id: trace.agent_id,
-        timestamp: Date.parse(trace.timestamp),
-        tool_name: trace.tool_name,
-        action_type: trace.action_type,
-        params: trace.params,
-        result: trace.result,
-        duration_ms: trace.duration_ms,
-        trace_json: trace,
-      }),
+      body: JSON.stringify(trace),
       signal: controller.signal,
     });
 
@@ -82,10 +92,10 @@ export async function submitTrace(
       };
     }
 
-    // Supabase returns empty body with Prefer: return=minimal
+    const result = await response.json().catch(() => ({})) as { trace_id?: string };
     return {
       success: true,
-      trace_id: trace.id,
+      trace_id: result.trace_id || trace.id,
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -105,40 +115,21 @@ export async function submitTrace(
 /**
  * Submit a batch of traces to the API
  */
-export async function submitTraceBatch(
-  traces: AAPTrace[],
-  config: SmoltbotConfig
-): Promise<BatchTraceResponse> {
+export async function submitTraceBatch(traces: AAPTrace[]): Promise<BatchTraceResponse> {
   if (traces.length === 0) {
     return { success: true, accepted: 0, rejected: 0 };
   }
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), config.timeout);
+    const timeoutId = setTimeout(() => controller.abort(), currentConfig.timeout);
 
-    // Supabase REST API supports batch insert with array body
-    const rows = traces.map(trace => ({
-      id: trace.id,
-      agent_id: trace.agent_id,
-      timestamp: Date.parse(trace.timestamp),
-      tool_name: trace.tool_name,
-      action_type: trace.action_type,
-      params: trace.params,
-      result: trace.result,
-      duration_ms: trace.duration_ms,
-      trace_json: trace,
-    }));
-
-    const response = await fetch(`${config.apiUrl}/rest/v1/traces`, {
+    const response = await fetch(API_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'apikey': config.apiKey,
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Prefer': 'return=minimal',
       },
-      body: JSON.stringify(rows),
+      body: JSON.stringify({ batch: traces }),
       signal: controller.signal,
     });
 
@@ -154,11 +145,16 @@ export async function submitTraceBatch(
       };
     }
 
-    // Supabase returns empty body with Prefer: return=minimal
+    const result = await response.json().catch(() => ({ accepted: traces.length })) as {
+      accepted?: number;
+      rejected?: number;
+      errors?: Array<{ trace_id: string; error: string }>;
+    };
     return {
       success: true,
-      accepted: traces.length,
-      rejected: 0,
+      accepted: result.accepted ?? traces.length,
+      rejected: result.rejected ?? 0,
+      errors: result.errors,
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -177,11 +173,6 @@ export async function submitTraceBatch(
  * Queue a trace for batched submission
  */
 export function queueTrace(trace: AAPTrace): void {
-  if (!currentConfig) {
-    console.warn('[smoltbot] API not initialized, trace dropped');
-    return;
-  }
-
   traceQueue.push(trace);
 
   // If we've hit the batch size, flush immediately
@@ -206,7 +197,7 @@ export async function flushTraceQueue(): Promise<void> {
     flushTimeout = null;
   }
 
-  if (traceQueue.length === 0 || !currentConfig) {
+  if (traceQueue.length === 0) {
     return;
   }
 
@@ -214,9 +205,9 @@ export async function flushTraceQueue(): Promise<void> {
   traceQueue = [];
 
   if (traces.length === 1) {
-    await submitTrace(traces[0], currentConfig);
+    await submitTrace(traces[0]);
   } else {
-    await submitTraceBatch(traces, currentConfig);
+    await submitTraceBatch(traces);
   }
 }
 
@@ -225,4 +216,11 @@ export async function flushTraceQueue(): Promise<void> {
  */
 export function getPendingTraceCount(): number {
   return traceQueue.length;
+}
+
+/**
+ * Get the API endpoint (for debugging/logging)
+ */
+export function getApiEndpoint(): string {
+  return API_ENDPOINT;
 }

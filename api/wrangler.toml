@@ -1,0 +1,20 @@
+# Smoltbot Trace API - Cloudflare Worker Configuration
+#
+# Deploy: wrangler deploy
+# Dev:    wrangler dev
+
+name = "smoltbot-api"
+main = "worker.ts"
+compatibility_date = "2024-01-01"
+
+# Custom domain (configure in Cloudflare dashboard)
+# routes = [{ pattern = "api.mnemom.ai/*", zone_name = "mnemom.ai" }]
+
+# Environment variables (set via wrangler secret)
+# wrangler secret put SUPABASE_URL
+# wrangler secret put SUPABASE_SERVICE_KEY
+
+# Optional: Rate limiting KV namespace
+# [[kv_namespaces]]
+# binding = "RATE_LIMIT"
+# id = "<your-kv-namespace-id>"
