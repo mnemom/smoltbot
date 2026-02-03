@@ -45,6 +45,8 @@ export interface TraceMetadata {
   error_stack?: string;
   /** Custom tags */
   tags?: string[];
+  /** Trace type: tool, user_message, or agent_response */
+  trace_type?: 'tool' | 'user_message' | 'agent_response';
 }
 
 /**
