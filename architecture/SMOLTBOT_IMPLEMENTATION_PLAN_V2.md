@@ -16,6 +16,121 @@ This plan implements the architecture defined in `SMOLTBOT_AAP_ARCHITECTURE_V2.m
 
 ---
 
+## CRITICAL: Existing Code Inventory
+
+**This is an EVOLUTION, not a greenfield build.** Significant code already exists. Failing to account for this will cause hours of debugging.
+
+### Existing Components (KEEP & REFINE)
+
+| Component | Path | Status | Purpose |
+|-----------|------|--------|---------|
+| **Plugin** | `plugin/` | ✅ Complete | OpenClaw plugin with `agent_end` hook, trace extraction, batching |
+| **API Worker** | `api/worker.ts` | ✅ Complete | Cloudflare Worker for receiving traces, rate limiting, Supabase writes |
+| **Database Schema** | `database/schema.sql` | ✅ Complete | Traces table with indexes and constraints |
+| **RLS Policies** | `database/policies.sql` | ✅ Complete | Row-level security for public reads |
+
+### New Components (BUILD)
+
+| Component | Path | Status | Purpose |
+|-----------|------|--------|---------|
+| **Gateway Worker** | `gateway/` | 🔨 New | Hosted API proxy at gateway.mnemom.ai |
+| **Observer Worker** | `observer/` | 🔨 New | Process AI Gateway logs, extract `<think>`, build AP-Traces |
+| **CLI** | `cli/` | 🔨 New | User commands: init, status, logs, integrity |
+
+### Architecture: How Components Interact
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  TWO PARALLEL TRACE SOURCES (both valid, complementary)                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  SOURCE 1: Plugin (existing) ─────────────────────────────────────────  │
+│  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐          │
+│  │   OpenClaw   │─────▶│   Plugin     │─────▶│  API Worker  │──┐       │
+│  │              │      │  agent_end   │      │  /v1/traces  │  │       │
+│  └──────────────┘      │  hook        │      └──────────────┘  │       │
+│                        └──────────────┘                        │       │
+│  • Captures: tool calls, user messages, agent responses        │       │
+│  • Precise turn counting, session tracking                     │       │
+│  • Works TODAY                                                 ▼       │
+│                                                         ┌──────────┐   │
+│  SOURCE 2: Gateway + Observer (new) ──────────────────▶ │ Supabase │   │
+│  ┌──────────────┐      ┌──────────────┐      ┌────────┐ │  traces  │   │
+│  │   OpenClaw   │─────▶│   Gateway    │─────▶│ AI GW  │ └──────────┘   │
+│  │              │      │   Worker     │      │ (logs) │       ▲       │
+│  └──────────────┘      └──────────────┘      └───┬────┘       │       │
+│                                                  │            │       │
+│                        ┌──────────────┐          │            │       │
+│                        │   Observer   │◀─────────┘            │       │
+│                        │   Worker     │───────────────────────┘       │
+│                        └──────────────┘                               │
+│  • Captures: raw <think> blocks (before OpenClaw strips them)         │
+│  • Haiku analysis of reasoning                                        │
+│  • AP-Trace format with decision structure                            │
+│                                                                        │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Schema Evolution Required
+
+The existing `database/schema.sql` differs from V2 requirements:
+
+**Existing schema (traces table):**
+```sql
+-- Current columns
+id, agent_id, timestamp (BIGINT), tool_name, action_type ('allow'|'deny'|'error'),
+params, result, duration_ms, trace_json, created_at
+```
+
+**V2 schema additions needed:**
+```sql
+-- New tables
+agents          -- Agent registry with agent_hash for gateway identification
+alignment_cards -- Alignment cards for verification
+sessions        -- Optional session tracking
+drift_alerts    -- Drift detection alerts
+
+-- Traces table changes
+session_id      -- Link to sessions table
+card_id         -- Link to alignment_cards (for verification)
+decision        -- JSONB for decision structure (from Haiku analysis)
+escalation      -- JSONB for escalation evaluation
+outcome         -- JSONB for outcome details
+verification    -- JSONB for verification results
+
+-- Column type change
+timestamp       -- BIGINT → TIMESTAMPTZ (or keep BIGINT, handle in code)
+action_type     -- 'allow'|'deny'|'error' → 'execute'|'communicate'
+```
+
+**Migration strategy:**
+1. Add new tables (agents, alignment_cards, sessions, drift_alerts)
+2. Add new columns to traces (nullable initially)
+3. Existing traces continue to work (plugin path)
+4. New traces from Observer use full schema
+5. No breaking changes to existing plugin/API
+
+### Key Integration Points
+
+**1. Agent ID consistency:**
+- Plugin uses agent ID from `~/.smoltbot/config.json`
+- Gateway derives agent ID from API key hash
+- These MUST resolve to the same agent record in Supabase
+- Solution: When user runs `smoltbot init`, register agent_id AND compute agent_hash from their API key
+
+**2. Trace deduplication:**
+- Plugin sends traces via API Worker
+- Observer sends traces from Gateway logs
+- Same action could generate TWO traces
+- Solution: Different trace sources use different ID prefixes (`tr-plugin-*` vs `tr-observer-*`), or use `source` field
+
+**3. Schema compatibility:**
+- Plugin sends: `{id, agent_id, timestamp, tool_name, action_type, params, result, ...}`
+- Observer sends: `{trace_id, agent_id, card_id, session_id, action, decision, ...}`
+- Solution: Both write to `trace_json` for full data, use common columns where possible
+
+---
+
 ## Phase 0: Infrastructure Setup
 
 **Duration:** Day 1
@@ -42,18 +157,26 @@ curl -X POST "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai-gate
 
 **Output:** Internal Gateway URL: `https://gateway.ai.cloudflare.com/v1/{account_id}/smoltbot/anthropic`
 
-### 0.2 Supabase Project
+### 0.2 Supabase Schema Migration
+
+**IMPORTANT:** A Supabase project already exists with the V1 schema (`database/schema.sql`).
+We need to MIGRATE, not replace.
 
 ```bash
-# 1. Create project at supabase.com
-# 2. Note: project URL, anon key, service role key
-
-# 3. Run schema in SQL Editor:
+# 1. Connect to existing Supabase project
+# 2. Run migration SQL (additive changes only)
 ```
 
+**Migration SQL (run this, NOT the full schema):**
+
 ```sql
--- Agents registry
-CREATE TABLE agents (
+-- ============================================
+-- MIGRATION: V1 → V2 Schema
+-- Run this on existing Supabase project
+-- ============================================
+
+-- 1. Add agents table (new)
+CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,                    -- smolt-xxxxxxxx
   agent_hash TEXT UNIQUE,                 -- sha256(api_key).slice(0,16)
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -123,22 +246,41 @@ CREATE TABLE sessions (
   status TEXT DEFAULT 'active'            -- 'active' | 'ended'
 );
 
-CREATE INDEX idx_sessions_agent ON sessions(agent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, started_at DESC);
 
--- RLS: Traces are public (transparency!)
+-- 5. Add new columns to existing traces table (nullable for backwards compat)
+ALTER TABLE traces ADD COLUMN IF NOT EXISTS session_id TEXT;
+ALTER TABLE traces ADD COLUMN IF NOT EXISTS card_id TEXT;
+ALTER TABLE traces ADD COLUMN IF NOT EXISTS action_name TEXT;
+ALTER TABLE traces ADD COLUMN IF NOT EXISTS decision JSONB;
+ALTER TABLE traces ADD COLUMN IF NOT EXISTS escalation JSONB;
+ALTER TABLE traces ADD COLUMN IF NOT EXISTS outcome JSONB;
+ALTER TABLE traces ADD COLUMN IF NOT EXISTS verification JSONB;
+ALTER TABLE traces ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'plugin';  -- 'plugin' or 'observer'
+
+-- 6. Create indexes for new columns
+CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_traces_source ON traces(source);
+
+-- 7. RLS policies (if not already set)
 ALTER TABLE traces ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Traces are publicly readable" ON traces;
 CREATE POLICY "Traces are publicly readable" ON traces FOR SELECT USING (true);
 
--- RLS: Agents are public (for dashboard)
 ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Agents are publicly readable" ON agents FOR SELECT USING (true);
 
--- RLS: Cards are public
 ALTER TABLE alignment_cards ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Cards are publicly readable" ON alignment_cards FOR SELECT USING (true);
+
+-- ============================================
+-- END MIGRATION
+-- Existing plugin/API continue to work unchanged
+-- New Gateway/Observer use extended schema
+-- ============================================
 ```
 
-**Verify:**
+**Verify migration:**
 ```bash
 # Insert test agent
 curl -X POST "{supabase_url}/rest/v1/agents" \
