@@ -2,10 +2,12 @@ name = "smoltbot-gateway"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
 
-# Custom domain (uncomment when DNS is configured)
-# routes = [
-#   { pattern = "gateway.mnemom.ai", custom_domain = true }
-# ]
+# Custom domain
+routes = [
+  { pattern = "gateway.mnemom.ai", custom_domain = true }
+]
+
+workers_dev = true
 
 [vars]
 GATEWAY_VERSION = "2.0.0"
