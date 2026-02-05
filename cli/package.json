@@ -1,0 +1,27 @@
+{
+  "name": "smoltbot",
+  "version": "2.0.0",
+  "description": "Transparent AI agent tracing - AAP compliant",
+  "type": "module",
+  "bin": {
+    "smoltbot": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  },
+  "files": ["dist"],
+  "keywords": ["ai", "agent", "transparency", "aap", "alignment"],
+  "author": "Mnemon",
+  "license": "MIT"
+}
