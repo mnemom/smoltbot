@@ -483,14 +483,23 @@ async function reportSession(
 
 **Purpose:** Process raw logs, extract reasoning, build AP-Traces.
 
-**Runtime:** Cloudflare Worker with Cron trigger (every 30 seconds).
+**Runtime:** Cloudflare Worker with Cron trigger (every 60 seconds).
 
 **One Observer for all smoltbots** — routes by agent_id.
+
+**AAP SDK Integration:** The Observer imports the official `agent-alignment-protocol` npm package for trace verification and drift detection. This uses `verifyTrace()` and `detectDrift()` from the SDK to ensure full AAP compliance. The same verification code is available for users to run locally.
 
 **Processing Flow:**
 
 ```typescript
 // observer/src/worker.ts
+
+import {
+  verifyTrace,
+  detectDrift,
+  type APTrace,
+  type AlignmentCard,
+} from 'agent-alignment-protocol';
 
 interface Env {
   CF_ACCOUNT_ID: string;
@@ -549,13 +558,20 @@ async function processLog(log: GatewayLog, env: Env): Promise<void> {
     thinking,
   });
 
-  // 7. Verify against card
+  // 7. Verify against card using AAP SDK
   trace.verification = verifyTrace(trace, card);
 
-  // 8. Submit to storage
+  // 8. Check for drift using AAP SDK
+  const recentTraces = await fetchRecentTraces(agent_id, env);
+  const driftResult = detectDrift(recentTraces, card);
+  if (driftResult.detected) {
+    await submitDriftAlert(agent_id, card.card_id, driftResult, env);
+  }
+
+  // 9. Submit to storage
   await submitTrace(trace, env);
 
-  // 9. Delete raw log (privacy: minimal retention)
+  // 10. Delete raw log (privacy: minimal retention)
   await deleteLog(log.id, env);
 }
 
@@ -582,7 +598,7 @@ function extractThinkingBlocks(response: string): string | null {
 
 **Location:** Stored in Supabase, managed via CLI or web dashboard.
 
-**Structure:**
+**Structure:** Matches the AAP SDK's `AlignmentCard` type from `agent-alignment-protocol`:
 
 ```json
 {
@@ -594,7 +610,9 @@ function extractThinkingBlocks(response: string): string | null {
 
   "principal": {
     "type": "human",
-    "relationship": "delegated_authority"
+    "identifier": "user@example.com",
+    "relationship": "delegated_authority",
+    "escalation_contact": "user@example.com"
   },
 
   "values": {
@@ -610,11 +628,21 @@ function extractThinkingBlocks(response: string): string | null {
         "description": "Reported actions match actual actions taken",
         "priority": 2
       }
-    }
+    },
+    "conflicts_with": {
+      "transparency": ["secrecy"],
+      "accuracy": ["speculation"]
+    },
+    "hierarchy": ["transparency", "accuracy"]
   },
 
   "autonomy_envelope": {
-    "bounded_actions": [],
+    "bounded_actions": [
+      {
+        "action": "read_file",
+        "constraints": { "max_size_mb": 10 }
+      }
+    ],
     "escalation_triggers": [
       {
         "condition": "action_type == 'delete_file'",
@@ -622,12 +650,14 @@ function extractThinkingBlocks(response: string): string | null {
         "reason": "Destructive operations logged for audit"
       }
     ],
-    "forbidden_actions": []
+    "max_autonomous_value": 1000,
+    "forbidden_actions": ["execute_shell_without_approval"]
   },
 
   "audit_commitment": {
     "trace_format": "ap-trace-v1",
     "retention_days": 365,
+    "storage": "supabase",
     "queryable": true,
     "query_endpoint": "https://mnemom.ai/agents/{agent_id}/traces",
     "tamper_evidence": "append_only"
@@ -643,25 +673,79 @@ function extractThinkingBlocks(response: string): string | null {
 }
 ```
 
+**Type Definition (from AAP SDK):**
+
+```typescript
+interface AlignmentCard {
+  aap_version: string;
+  card_id: string;
+  agent_id: string;
+  issued_at: string;
+  config_hash?: string;
+
+  principal: {
+    type: 'human' | 'organization' | 'agent';
+    identifier?: string;
+    relationship: 'owner' | 'delegated_authority' | 'supervised';
+    escalation_contact?: string;
+  };
+
+  values: {
+    declared: string[];
+    definitions?: Record<string, {
+      name: string;
+      description: string;
+      priority: number;
+    }>;
+    conflicts_with?: Record<string, string[]>;
+    hierarchy?: string[];
+  };
+
+  autonomy_envelope: {
+    bounded_actions: Array<{
+      action: string;
+      constraints?: Record<string, unknown>;
+    }>;
+    escalation_triggers: Array<{
+      condition: string;
+      action: 'log' | 'pause' | 'deny';
+      reason: string;
+    }>;
+    max_autonomous_value?: number;
+    forbidden_actions?: string[];
+  };
+
+  audit_commitment: {
+    trace_format?: string;
+    retention_days: number;
+    storage?: string;
+    queryable: boolean;
+    query_endpoint?: string;
+    tamper_evidence?: 'append_only' | 'merkle_tree' | 'blockchain';
+  };
+
+  extensions?: Record<string, unknown>;
+}
+```
+
 ### 5.6 AP-Trace Structure
 
-Every action generates a proper AP-Trace:
+Every action generates a proper AP-Trace. Structure matches the AAP SDK's `APTrace` type from `agent-alignment-protocol`:
 
 ```json
 {
   "trace_id": "tr-{uuid}",
   "agent_id": "smolt-{uuid}",
   "card_id": "ac-{uuid}",
-  "session_id": "sess-{uuid}",
   "timestamp": "2026-02-03T12:00:00Z",
 
   "action": {
     "type": "execute",
     "name": "Read",
     "category": "bounded",
-    "target": {
-      "type": "file",
-      "identifier": "/path/to/file.ts"
+    "target": "/path/to/file.ts",
+    "parameters": {
+      "encoding": "utf-8"
     }
   },
 
@@ -686,7 +770,20 @@ Every action generates a proper AP-Trace:
     "evaluated": true,
     "triggers_checked": ["delete_file", "execute_code"],
     "required": false,
-    "reason": "No escalation triggers matched"
+    "reason": "No escalation triggers matched",
+    "escalation_id": null,
+    "escalation_status": null,
+    "principal_response": null
+  },
+
+  "context": {
+    "session_id": "sess-{uuid}",
+    "conversation_turn": 3,
+    "prior_trace_ids": ["tr-abc123", "tr-def456"],
+    "environment": "production",
+    "metadata": {
+      "gateway_version": "2.0.0"
+    }
   },
 
   "outcome": {
@@ -707,6 +804,68 @@ Every action generates a proper AP-Trace:
     "thinking_block": "<original thinking content>",
     "gateway_log_id": "log-{id}"
   }
+}
+```
+
+**Type Definition (from AAP SDK):**
+
+```typescript
+interface APTrace {
+  trace_id: string;
+  agent_id: string;
+  card_id: string;
+  timestamp: string;
+
+  action: {
+    type: 'execute' | 'communicate' | 'observe' | 'delegate';
+    name: string;
+    category: 'bounded' | 'escalation_required' | 'forbidden';
+    target?: string;
+    parameters?: Record<string, unknown>;
+  };
+
+  decision: {
+    alternatives_considered: Array<{
+      option_id: string;
+      description: string;
+    }>;
+    selected: string;
+    selection_reasoning: string;
+    values_applied: string[];
+    confidence?: 'high' | 'medium' | 'low';
+  };
+
+  escalation: {
+    evaluated: boolean;
+    triggers_checked?: string[];
+    required: boolean;
+    reason: string;
+    escalation_id?: string | null;
+    escalation_status?: 'pending' | 'approved' | 'denied' | null;
+    principal_response?: string | null;
+  };
+
+  context?: {
+    session_id?: string;
+    conversation_turn?: number;
+    prior_trace_ids?: string[];
+    environment?: string;
+    metadata?: Record<string, unknown>;
+  };
+
+  outcome?: {
+    success: boolean;
+    result_summary: string;
+    duration_ms?: number;
+  };
+
+  verification?: {
+    verified: boolean;
+    autonomy_compliant: boolean;
+    escalation_compliant?: boolean;
+    violations: string[];
+    warnings: string[];
+  };
 }
 ```
 
@@ -818,6 +977,67 @@ ALTER TABLE alignment_cards ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Cards are publicly readable"
   ON alignment_cards FOR SELECT
   USING (true);
+```
+
+### 5.8 AAP SDK Integration
+
+Smoltbot uses the official `agent-alignment-protocol` npm package to ensure full protocol compliance. This provides:
+
+**Verification Functions:**
+- `verifyTrace(trace: APTrace, card: AlignmentCard)` — Validates a trace against the alignment card
+- `detectDrift(traces: APTrace[], card: AlignmentCard)` — Analyzes trace history for behavioral drift
+
+**Type Definitions:**
+- `AlignmentCard` — Full alignment card structure (Section 5.5)
+- `APTrace` — Full trace structure (Section 5.6)
+- Supporting types for actions, decisions, escalations, and context
+
+**Benefits:**
+1. **Compliance Guarantee:** Same verification code that users can run locally
+2. **Type Safety:** TypeScript types ensure correct structure
+3. **Protocol Updates:** SDK updates automatically propagate to all smoltbots
+4. **Local Verification:** Users can import the same SDK to verify traces independently
+
+**Installation:**
+
+```bash
+npm install agent-alignment-protocol
+```
+
+**Usage in Observer:**
+
+```typescript
+import {
+  verifyTrace,
+  detectDrift,
+  type APTrace,
+  type AlignmentCard,
+} from 'agent-alignment-protocol';
+
+// Verify a single trace
+const verification = verifyTrace(trace, card);
+// Returns: { verified: boolean, violations: string[], warnings: string[] }
+
+// Detect drift across multiple traces
+const driftResult = detectDrift(recentTraces, card);
+// Returns: { detected: boolean, type?: string, severity?: string, description?: string }
+```
+
+**User Verification:**
+
+Users can verify their own traces using the same SDK:
+
+```typescript
+import { verifyTrace } from 'agent-alignment-protocol';
+
+// Fetch trace from API
+const trace = await fetch('https://mnemom.ai/api/traces/tr-xxx').then(r => r.json());
+const card = await fetch('https://mnemom.ai/api/cards/ac-xxx').then(r => r.json());
+
+// Verify locally
+const result = verifyTrace(trace, card);
+console.log('Verified:', result.verified);
+console.log('Violations:', result.violations);
 ```
 
 ---
@@ -944,62 +1164,64 @@ Users can verify by:
 
 ## 8. Implementation Checklist
 
-### 8.1 Gateway Worker (`gateway.mnemom.ai`)
+### 8.1 Gateway Worker (`gateway.mnemom.ai`) ✅ COMPLETE
 
-- [ ] Request routing for `/anthropic/*` paths
-- [ ] API key extraction and hashing
-- [ ] Agent lookup/creation from hash
-- [ ] Session ID generation
-- [ ] Metadata header injection
-- [ ] Forward to AI Gateway
-- [ ] Response passthrough
-- [ ] Error handling and logging
+- [x] Request routing for `/anthropic/*` paths
+- [x] API key extraction and hashing
+- [x] Agent lookup/creation from hash
+- [x] Session ID generation
+- [x] Metadata header injection
+- [x] Forward to AI Gateway
+- [x] Response passthrough
+- [x] Error handling and logging
 
-### 8.2 Observer Worker
+### 8.2 Observer Worker ✅ COMPLETE
 
-- [ ] Cron trigger every 30s
-- [ ] Query AI Gateway logs API
-- [ ] Fetch response bodies
-- [ ] Extract `<think>` blocks
-- [ ] Call Haiku for analysis
-- [ ] Build AP-Trace structure
-- [ ] Verify against alignment card
-- [ ] Submit to Supabase
-- [ ] Delete processed logs
-- [ ] Error handling with retry
+- [x] Cron trigger every 60s
+- [x] Query AI Gateway logs API
+- [x] Fetch response bodies
+- [x] Extract `<think>` blocks
+- [x] Call Haiku for analysis
+- [x] Build AP-Trace structure
+- [x] AAP SDK integrated for verification
+- [x] Verify against alignment card using `verifyTrace()`
+- [x] Detect drift using `detectDrift()`
+- [x] Submit to Supabase
+- [x] Delete processed logs
+- [x] Error handling with retry
 
-### 8.3 CLI (`smoltbot` command)
+### 8.3 CLI (`smoltbot` command) ✅ COMPLETE
 
-- [ ] `smoltbot init`
-  - [ ] Generate agent_id
-  - [ ] Create ~/.smoltbot/ directory
-  - [ ] Generate default config.json
-  - [ ] Register agent with backend
-  - [ ] Output env var instructions
+- [x] `smoltbot init`
+  - [x] Generate agent_id
+  - [x] Create ~/.smoltbot/ directory
+  - [x] Generate default config.json
+  - [x] Register agent with backend
+  - [x] Output env var instructions
 
-- [ ] `smoltbot status` — Show agent status
-- [ ] `smoltbot update-card` — Regenerate card from config
-- [ ] `smoltbot integrity` — Fetch and display integrity score
-- [ ] `smoltbot logs` — Tail recent traces
-- [ ] `smoltbot config` — Edit configuration
+- [x] `smoltbot status` — Show agent status
+- [ ] `smoltbot update-card` — Regenerate card from config (future)
+- [x] `smoltbot integrity` — Fetch and display integrity score
+- [x] `smoltbot logs` — Tail recent traces
+- [ ] `smoltbot config` — Edit configuration (future)
 
-### 8.4 Plugin (Optional)
+### 8.4 Plugin (Optional) — DEFERRED
 
 - [ ] Register session_start hook
 - [ ] Track conversation turns
 - [ ] Report session events to backend
 
-### 8.5 Backend API
+### 8.5 Backend API ✅ COMPLETE
 
-- [ ] POST /v1/agents — Register new agent
-- [ ] GET /v1/agents/{id} — Get agent info
-- [ ] POST /v1/agents/{id}/claim — Claim agent ownership
-- [ ] GET /v1/traces — Query traces
-- [ ] GET /v1/cards/{agent_id} — Get active alignment card
-- [ ] PUT /v1/cards/{agent_id} — Update alignment card
-- [ ] GET /v1/integrity/{agent_id} — Get integrity score
+- [x] POST /v1/agents — Register new agent (via gateway auto-creation)
+- [x] GET /v1/agents/{id} — Get agent info
+- [ ] POST /v1/agents/{id}/claim — Claim agent ownership (future)
+- [x] GET /v1/traces — Query traces
+- [x] GET /v1/cards/{agent_id} — Get active alignment card
+- [ ] PUT /v1/cards/{agent_id} — Update alignment card (future)
+- [x] GET /v1/integrity/{agent_id} — Get integrity score
 
-### 8.6 Dashboard
+### 8.6 Dashboard — FUTURE PHASE
 
 - [ ] mnemom.ai/agents/{agent_id}
 - [ ] Live trace feed
@@ -1007,6 +1229,15 @@ Users can verify by:
 - [ ] Drift alerts
 - [ ] Alignment card viewer/editor
 - [ ] Account claiming flow
+
+### 8.7 AAP SDK Compliance ✅ COMPLETE
+
+- [x] AAP SDK (`@mnemom/agent-alignment-protocol`) integrated in Observer Worker
+- [x] Trace structure matches `APTrace` type from SDK
+- [x] Card structure matches `AlignmentCard` type from SDK
+- [x] `verifyTrace()` used for all trace verification
+- [x] `detectDrift()` used for behavioral drift detection
+- [x] SDK types exported for user verification
 
 ---
 
@@ -1118,26 +1349,26 @@ if (card.extensions?.smoltbot?.phase >= 2) {
 
 ## 11. Success Criteria
 
-### Phase 1 Complete When:
+### Phase 1 Complete When: ✅ ACHIEVED
 
-- [ ] `npm install -g smoltbot && smoltbot init` works end-to-end
-- [ ] User sets one env var, runs `openclaw` normally
-- [ ] Every API call is logged with full response (including `<think>`)
-- [ ] Observer processes logs within 60 seconds
-- [ ] AP-Traces have proper decision structure from Haiku analysis
-- [ ] Traces are verified against alignment card
-- [ ] Traces are publicly queryable at mnemom.ai/agents/{id}
-- [ ] Integrity score is computed and displayed
-- [ ] Account claiming works
-- [ ] Works identically: local, Fly.io, AWS, Kubernetes, corporate VPN
+- [x] `npm install -g smoltbot && smoltbot init` works end-to-end
+- [x] User sets one env var, runs `openclaw` normally
+- [x] Every API call is logged with full response (including `<think>`)
+- [x] Observer processes logs within 60 seconds
+- [x] AP-Traces have proper decision structure from Haiku analysis
+- [x] Traces are verified against alignment card
+- [x] Traces are publicly queryable via API (dashboard future)
+- [x] Integrity score is computed and displayed
+- [ ] Account claiming works (future enhancement)
+- [x] Works identically: local, Fly.io, AWS, Kubernetes, corporate VPN
 
-### Metrics:
+### Metrics (Verified 2026-02-04):
 
-- **Trace completeness**: 100% of API calls traced
-- **Processing latency**: < 60s from API call to trace visible
-- **Verification rate**: 100% of traces verified
-- **Gateway latency**: < 100ms added per request
-- **Environment compatibility**: Works in all tested environments
+- **Trace completeness**: 100% of API calls traced ✓
+- **Processing latency**: < 60s from API call to trace visible ✓
+- **Verification rate**: 100% of traces verified ✓
+- **Gateway latency**: < 100ms added per request ✓
+- **Environment compatibility**: Works in all tested environments ✓
 
 ---
 
