@@ -43,7 +43,7 @@ describe("api", () => {
 
   describe("API_BASE", () => {
     it("should be set to the correct API URL", () => {
-      expect(API_BASE).toBe("https://api.mnemon.ai");
+      expect(API_BASE).toBe("https://api.mnemom.ai");
     });
   });
 
@@ -51,7 +51,7 @@ describe("api", () => {
     it("should fetch agent by ID", async () => {
       const mockAgent: Agent = {
         id: "smolt-abc12345",
-        gateway: "https://gateway.mnemon.ai",
+        gateway: "https://gateway.mnemom.ai",
         last_seen: "2024-01-15T10:30:00Z",
         claimed: true,
         email: "test@example.com",
@@ -71,7 +71,7 @@ describe("api", () => {
     it("should handle unclaimed agent", async () => {
       const mockAgent: Agent = {
         id: "smolt-newagent",
-        gateway: "https://gateway.mnemon.ai",
+        gateway: "https://gateway.mnemom.ai",
         last_seen: null,
         claimed: false,
         created_at: "2024-01-15T00:00:00Z",

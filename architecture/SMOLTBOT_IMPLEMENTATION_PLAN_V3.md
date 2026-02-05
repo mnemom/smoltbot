@@ -29,11 +29,14 @@
 - [x] Log deletion working (filter-based: `?filters=[{key,operator,value}]`)
 - [x] Drift detection integrated (limited to 1 alert per check)
 
-### Phase 3: CLI ✅ COMPLETE (Basic)
+### Phase 3: CLI ✅ COMPLETE
 - [x] CLI built (`/Users/alexgarden/projects/smoltbot/cli/`)
-- [x] `smoltbot init` creates config
-- [x] `smoltbot status` shows info
+- [x] `smoltbot init` detects OpenClaw and configures smoltbot provider
+- [x] `smoltbot init` reads API key from auth-profiles.json
+- [x] `smoltbot init` detects current model and offers to switch
+- [x] `smoltbot status` shows comprehensive system checks and E2E verification
 - [x] Ready for npm link/publish
+- [x] 92 tests passing (config, api, openclaw, models, prompt)
 
 ### Phase 4: Backend API ✅ COMPLETE
 - [x] API Worker deployed (`api.mnemom.ai`)
@@ -44,7 +47,7 @@
 ### Phase 5: Integration Testing ✅ VERIFIED
 - [x] E2E flow verified: Gateway → AI Gateway → Observer → Supabase
 - [x] Traces appear within 60 seconds of API call
-- [x] 113 tests written (41 gateway + 41 observer + 31 CLI)
+- [x] 174 tests written (41 gateway + 41 observer + 92 CLI)
 
 ---
 
@@ -79,11 +82,105 @@ The following issues were discovered and fixed during E2E verification:
 
 ---
 
+## OpenClaw Integration Research (2026-02-05)
+
+### Approaches Tested and Results
+
+| Approach | Result | Notes |
+|----------|--------|-------|
+| `ANTHROPIC_BASE_URL` env var | ❌ NOT SUPPORTED | OpenClaw ignores this env var |
+| `providers.anthropic.baseUrl` | ❌ REJECTED | "Unrecognized key: providers" at root level |
+| `models.providers` with `authProfile` | ❌ REJECTED | "Unrecognized key: authProfile" |
+| `models.providers` with `apiKey` | ✅ WORKS | Requires direct API key, no profile reference |
+| Local proxy | ❌ REJECTED | Brittle (VPNs, firewalls, daemon lifecycle) |
+
+### Working Configuration
+
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "smoltbot": {
+        "baseUrl": "https://gateway.mnemom.ai/anthropic",
+        "api": "anthropic-messages",
+        "apiKey": "<copied from auth-profiles.json>",
+        "models": [
+          {
+            "id": "claude-opus-4-5-20251101",
+            "name": "Claude Opus 4.5",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 200000,
+            "maxTokens": 64000
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+### Key Findings
+
+1. **Config Locations**:
+   - `~/.openclaw/openclaw.json` - main config
+   - `~/.openclaw/agents/main/agent/auth-profiles.json` - API keys (source of truth)
+   - `~/.openclaw/agents/main/agent/models.json` - auto-generated from main config
+
+2. **baseUrl Must Include Path**: Use `https://gateway.mnemom.ai/anthropic` (not just the domain)
+
+3. **Model IDs Must Be Exact**: Use full IDs like `claude-opus-4-5-20251101`, not aliases
+
+4. **Config Propagation**: Writing to `openclaw.json` creates/updates `agents/main/agent/models.json`
+
+5. **OAuth Not Supported**: This approach only works for API key auth (tokens can't be refreshed)
+
+### Cloudflare WAF Configuration Required
+
+Cloudflare's Bot Management blocks the `Anthropic/JS` User-Agent by default.
+
+**Required Security Rule:**
+- **Name**: Route gateway.mnemom.ai traffic
+- **When**: Hostname equals `gateway.mnemom.ai`
+- **Action**: Skip
+- **Skip**: All managed rules + All Super Bot Fight Mode Rules
+
+Without this rule, requests return `403 Your request was blocked`.
+
+### smoltbot init Implementation ✅ COMPLETE (2026-02-05)
+
+`smoltbot init` performs the following steps:
+1. Detect OpenClaw installation (`~/.openclaw/`)
+2. Check auth method (API key supported, OAuth rejected with clear error)
+3. Read API key from `~/.openclaw/agents/main/agent/auth-profiles.json`
+4. Detect current model from `agents.defaults.model.primary`
+5. Configure `smoltbot` provider in `~/.openclaw/openclaw.json`
+6. Offer Y/n prompt to switch default model to traced version
+7. Create `~/.smoltbot/config.json` with agent ID
+8. Show success message with dashboard URL
+
+**CLI Flags:**
+- `--yes` / `-y`: Skip confirmation prompts (accept defaults)
+- `--force` / `-f`: Force reconfiguration even if already configured
+
+**New CLI Modules:**
+- `lib/openclaw.ts`: OpenClaw config detection and manipulation
+- `lib/models.ts`: Known Anthropic model definitions with specs
+- `lib/prompt.ts`: Y/n prompt utility
+
+**Limitations (documented in init output):**
+- API key only (no OAuth support)
+- Key duplication (in auth-profiles.json AND openclaw.json)
+- Key rotation requires re-running `smoltbot init`
+
+---
+
 ## Overview
 
 This plan implements the hosted gateway architecture. The gateway is the **sole** tracing mechanism — no hooks, no local infrastructure, no parallel systems.
 
-**Goal:** `npm install -g smoltbot && smoltbot init` → user sets one env var → runs OpenClaw → traces appear at `mnemom.ai/agents/{id}`
+**Goal:** `npm install -g smoltbot && smoltbot init` → OpenClaw configured automatically → traces appear at `mnemom.ai/agents/{id}`
 
 **Core Principle:** If it can make HTTPS requests, it works.
 
@@ -97,13 +194,13 @@ This plan implements the hosted gateway architecture. The gateway is the **sole*
 │   ┌──────────────┐                      ┌──────────────────┐                │
 │   │   OpenClaw   │───── HTTPS ─────────▶│  Gateway Worker  │                │
 │   │              │                      │  gateway.mnemom.ai                │
-│   │  (unchanged) │                      │                  │                │
-│   └──────────────┘                      │  • Hash API key  │                │
-│         │                               │  • Add metadata  │                │
+│   │  smoltbot    │                      │                  │                │
+│   │  provider    │                      │  • Hash API key  │                │
+│   └──────────────┘                      │  • Add metadata  │                │
 │         │                               │  • Forward req   │                │
-│   Just set:                             └────────┬─────────┘                │
-│   ANTHROPIC_BASE_URL=                            │                          │
-│   https://gateway.mnemom.ai/anthropic            ▼                          │
+│   smoltbot init:                        └────────┬─────────┘                │
+│   • Reads API key from auth-profiles             │                          │
+│   • Adds smoltbot provider to config             ▼                          │
 │                                         ┌──────────────────┐                │
 │                                         │  Cloudflare      │                │
 │                                         │  AI Gateway      │                │
