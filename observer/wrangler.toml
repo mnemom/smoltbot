@@ -1,0 +1,9 @@
+name = "smoltbot-observer"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+GATEWAY_ID = "smoltbot"
