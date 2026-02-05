@@ -15,14 +15,14 @@
 - [x] Environment variables documented and secrets configured
 
 ### Phase 1: Gateway Worker ✅ COMPLETE
-- [x] Gateway Worker deployed (`smoltbot-gateway.mnemom.workers.dev`)
+- [x] Gateway Worker deployed (`gateway.mnemom.ai`)
 - [x] Requests forwarded to AI Gateway with auth token
 - [x] Agents auto-created in Supabase with `smolt-{hash}` IDs
 - [x] Default alignment cards created (AAP-compliant structure)
 - [x] `cf-aig-metadata` headers attached with agent_id, session_id, timestamp
 
 ### Phase 2: Observer Worker ✅ COMPLETE
-- [x] Observer Worker deployed (`smoltbot-observer.mnemom.workers.dev`)
+- [x] Observer Worker deployed (`smoltbot-observer.mnemom.workers.dev`, no custom domain needed)
 - [x] Logs fetched from AI Gateway (max 50 per page)
 - [x] Metadata extraction working (direct from `log.metadata`, not nested)
 - [x] Traces stored in Supabase with idempotent IDs (`tr-{log.id.slice(-8)}`)
@@ -36,7 +36,7 @@
 - [x] Ready for npm link/publish
 
 ### Phase 4: Backend API ✅ COMPLETE
-- [x] API Worker deployed (`smoltbot-api.mnemom.workers.dev`)
+- [x] API Worker deployed (`api.mnemom.ai`)
 - [x] Agent queries working
 - [x] Trace queries working
 - [x] Integrity calculation working
