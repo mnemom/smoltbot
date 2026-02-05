@@ -10,6 +10,8 @@ export interface Config {
   agentId: string;
   email?: string;
   gateway?: string;
+  openclawConfigured?: boolean;
+  configuredAt?: string;
 }
 
 export function configExists(): boolean {

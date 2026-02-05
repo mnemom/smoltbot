@@ -57,7 +57,7 @@ We achieve transparency without requiring users to:
 - Configure complex networking
 - Deal with port conflicts or process management
 
-A single environment variable change routes traffic through the hosted gateway.
+Running `smoltbot init` configures OpenClaw to route Anthropic traffic through the hosted gateway.
 
 ### 2.3 Universal Compatibility
 
@@ -96,17 +96,18 @@ We implement AAP exactly as specified:
 │                                                                             │
 │  $ npm install -g smoltbot                                                  │
 │  $ smoltbot init                                                            │
-│  $ export ANTHROPIC_BASE_URL="https://gateway.mnemom.ai/anthropic"         │
+│    → Reads API key from ~/.openclaw/agents/main/agent/auth-profiles.json   │
+│    → Adds smoltbot provider to ~/.openclaw/openclaw.json                   │
 │                                                                             │
 │  ┌──────────────┐                                                           │
 │  │   OpenClaw   │────── HTTPS ──────┐                                       │
 │  │              │                   │                                       │
-│  │  (unchanged) │                   │                                       │
+│  │   smoltbot   │                   │  Uses smoltbot/claude-opus-4-5-*     │
+│  │   provider   │                   │  provider for traced requests        │
 │  └──────────────┘                   │                                       │
 │                                     │                                       │
-│  ~/.smoltbot/                       │                                       │
-│    ├── config.json    (user config) │                                       │
-│    └── agent-id       (smolt-xxxxx) │                                       │
+│  ~/.smoltbot/config.json            │                                       │
+│  ~/.openclaw/openclaw.json (modified)                                       │
 └─────────────────────────────────────┼───────────────────────────────────────┘
                                       │
                                       ▼
@@ -182,22 +183,24 @@ npm install -g smoltbot
 smoltbot init
 
 # Output:
-# ✓ Generated agent ID: smolt-a1b2c3d4
+# ✓ Detected OpenClaw installation
+# ✓ Read API key from auth-profiles.json
+# ✓ Added smoltbot provider to OpenClaw config
 # ✓ Created config: ~/.smoltbot/config.json
-# ✓ Registered with smoltbot backend
 #
-# Add to your shell profile (~/.zshrc or ~/.bashrc):
+# Smoltbot provider configured with models:
+#   - smoltbot/claude-opus-4-5-20251101
+#   - smoltbot/claude-sonnet-4-5-20250929
+#   - smoltbot/claude-haiku-4-5-20251001
 #
-#   export ANTHROPIC_BASE_URL="https://gateway.mnemom.ai/anthropic"
-#
-# Then restart your shell or run: source ~/.zshrc
+# To use traced mode, select a smoltbot model:
+#   openclaw models set smoltbot/claude-opus-4-5-20251101
 #
 # Your traces will appear at:
-#   https://mnemom.ai/agents/smolt-a1b2c3d4
-#
-# To claim your account and access settings:
-#   https://mnemom.ai/claim/smolt-a1b2c3d4
+#   https://mnemom.ai/agents/smolt-{your-hash}
 ```
+
+**Note:** Agent ID is derived from your API key hash, so it's consistent across reinstalls.
 
 ### 4.3 Usage
 
@@ -1193,17 +1196,33 @@ Users can verify by:
 ### 8.3 CLI (`smoltbot` command) ✅ COMPLETE
 
 - [x] `smoltbot init`
+  - [x] Detect OpenClaw installation
+  - [x] Check for API key auth (reject OAuth with clear error)
+  - [x] Read API key from auth-profiles.json
+  - [x] Detect current model from config
+  - [x] Configure smoltbot provider in OpenClaw
+  - [x] Offer Y/n to switch default model
   - [x] Generate agent_id
-  - [x] Create ~/.smoltbot/ directory
-  - [x] Generate default config.json
-  - [x] Register agent with backend
-  - [x] Output env var instructions
+  - [x] Create ~/.smoltbot/config.json
+  - [x] Show success with dashboard URL
+  - [x] Support --yes and --force flags
 
-- [x] `smoltbot status` — Show agent status
+- [x] `smoltbot status`
+  - [x] System checks (config, OpenClaw, model, gateway, API)
+  - [x] E2E connectivity verification
+  - [x] Trace summary display
+  - [x] Clear status indicators (ok/warning/error)
+
 - [ ] `smoltbot update-card` — Regenerate card from config (future)
 - [x] `smoltbot integrity` — Fetch and display integrity score
 - [x] `smoltbot logs` — Tail recent traces
 - [ ] `smoltbot config` — Edit configuration (future)
+
+**CLI Modules:**
+- [x] `lib/openclaw.ts` — OpenClaw config utilities
+- [x] `lib/models.ts` — Anthropic model definitions
+- [x] `lib/prompt.ts` — Y/n prompt utility
+- [x] 92 tests passing
 
 ### 8.4 Plugin (Optional) — DEFERRED
 
@@ -1263,12 +1282,43 @@ Users can verify by:
 }
 ```
 
-### 9.2 Environment Variables
+### 9.2 OpenClaw Configuration (Added by `smoltbot init`)
 
-**User sets:**
-```bash
-export ANTHROPIC_BASE_URL="https://gateway.mnemom.ai/anthropic"
+**Added to `~/.openclaw/openclaw.json`:**
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "smoltbot": {
+        "baseUrl": "https://gateway.mnemom.ai/anthropic",
+        "api": "anthropic-messages",
+        "apiKey": "<copied from auth-profiles.json>",
+        "models": [
+          { "id": "claude-opus-4-5-20251101", "name": "Claude Opus 4.5", ... },
+          { "id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5", ... },
+          { "id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", ... }
+        ]
+      }
+    }
+  }
+}
 ```
+
+**Note:** API key is read from `~/.openclaw/agents/main/agent/auth-profiles.json` and written to the provider config. This is key duplication within OpenClaw's config ecosystem, automated by `smoltbot init`.
+
+### 9.3 Cloudflare WAF Requirement
+
+The gateway host requires a WAF exception rule to allow Anthropic SDK traffic:
+
+- **Rule name**: Route gateway.mnemom.ai traffic
+- **When**: Hostname equals `gateway.mnemom.ai`
+- **Action**: Skip
+- **Skip**: All managed rules + All Super Bot Fight Mode Rules
+
+Without this rule, Cloudflare blocks the `Anthropic/JS` User-Agent with 403.
+
+### 9.4 Environment Variables
 
 **Gateway Worker (Cloudflare secrets):**
 ```bash
