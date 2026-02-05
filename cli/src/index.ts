@@ -13,10 +13,12 @@ program
 
 program
   .command("init")
-  .description("Initialize smoltbot and generate agent ID")
-  .action(async () => {
+  .description("Initialize smoltbot and configure OpenClaw for traced mode")
+  .option("-y, --yes", "Skip confirmation prompts (accept defaults)")
+  .option("-f, --force", "Force reconfiguration even if already configured")
+  .action(async (options) => {
     try {
-      await initCommand();
+      await initCommand({ yes: options.yes, force: options.force });
     } catch (error) {
       console.error("Error:", error instanceof Error ? error.message : error);
       process.exit(1);
