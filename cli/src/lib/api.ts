@@ -1,5 +1,4 @@
-// Use workers.dev for now, switch to api.mnemom.ai when DNS is configured
-export const API_BASE = "https://smoltbot-api.mnemom.workers.dev";
+export const API_BASE = "https://api.mnemom.ai";
 
 export interface Agent {
   id: string;
