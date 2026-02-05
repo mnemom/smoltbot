@@ -23,8 +23,7 @@ export async function initCommand(): Promise<void> {
 
   // Generate new agent ID
   const agentId = generateAgentId();
-  // Use workers.dev for now, switch to gateway.mnemom.ai when DNS is configured
-  const gateway = "https://smoltbot-gateway.mnemom.workers.dev";
+  const gateway = "https://gateway.mnemom.ai";
 
   const config: Config = {
     agentId,
