@@ -1,0 +1,122 @@
+@import "tailwindcss";
+
+/* Mnemom Brand Colors - matching mnemom.ai */
+:root {
+  /* Brand */
+  --mn-bg: #F9F8F3;
+  --mn-text: #0F172A;
+  --mn-accent: #D97706;
+  --mn-accent-hover: #B45309;
+  --mn-border: #E2E8F0;
+  --mn-glass: rgba(255, 255, 255, 0.4);
+
+  /* Fonts */
+  --font-main: "Inter", -apple-system, sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", monospace;
+
+  /* Semantic (light mode) */
+  --color-accent: var(--mn-accent);
+  --color-accent-hover: var(--mn-accent-hover);
+  --color-bg-dark: var(--mn-bg);
+  --color-bg-card: #FFFFFF;
+  --color-bg-elevated: #FFFFFF;
+  --color-text-primary: var(--mn-text);
+  --color-text-secondary: rgba(15, 23, 42, 0.7);
+  --color-text-muted: rgba(15, 23, 42, 0.5);
+  --color-border: var(--mn-border);
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-error: #ef4444;
+}
+
+/* Dark mode */
+.dark, [data-theme="dark"] {
+  --mn-bg: #0D0D0E;
+  --mn-text: #ECECEC;
+  --mn-accent: #F59E0B;
+  --mn-accent-hover: #D97706;
+  --mn-border: #262626;
+  --mn-glass: rgba(26, 26, 27, 0.5);
+
+  --color-bg-dark: var(--mn-bg);
+  --color-bg-card: #1A1A1B;
+  --color-bg-elevated: #262627;
+  --color-text-primary: var(--mn-text);
+  --color-text-secondary: rgba(236, 236, 236, 0.7);
+  --color-text-muted: rgba(236, 236, 236, 0.5);
+  --color-border: var(--mn-border);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --mn-bg: #0D0D0E;
+    --mn-text: #ECECEC;
+    --mn-accent: #F59E0B;
+    --mn-accent-hover: #D97706;
+    --mn-border: #262626;
+    --mn-glass: rgba(26, 26, 27, 0.5);
+
+    --color-bg-dark: var(--mn-bg);
+    --color-bg-card: #1A1A1B;
+    --color-bg-elevated: #262627;
+    --color-text-primary: var(--mn-text);
+    --color-text-secondary: rgba(236, 236, 236, 0.7);
+    --color-text-muted: rgba(236, 236, 236, 0.5);
+    --color-border: var(--mn-border);
+  }
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--color-bg-dark);
+  color: var(--color-text-primary);
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-bg-dark);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* Code blocks */
+code {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  background: var(--color-bg-elevated);
+  padding: 0.2em 0.4em;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+pre {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
