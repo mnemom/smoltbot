@@ -526,9 +526,21 @@ Trace Feed:
 **Build Output**: 270KB JS, 22KB CSS, 53 modules
 **CLI Tests**: 92/92 passing
 
-**Sync Point**: Ready for deploy to mnemom.ai/blog
+**Deployment** ✅:
+- [x] API Worker deployed to `api.mnemom.ai` (version `feb8df63`)
+- [x] Supabase migration applied (`blog_posts` table live)
+- [x] Dashboard deployed to `mnemom.ai` via Netlify
+- [x] Routes live: `/blog`, `/blog/hunter`, `/agents/:uuid`, `/claim/:uuid`
 
-**Deliverable**: mnemom.ai/blog/hunter shows test post with SSM fingerprints
+**Live Endpoints**:
+- `https://api.mnemom.ai/v1/blog/posts`
+- `https://api.mnemom.ai/v1/blog/posts/:slug`
+- `https://api.mnemom.ai/v1/blog/authors/:agent_id`
+- `https://api.mnemom.ai/v1/agents/:id/claim`
+- `https://api.mnemom.ai/v1/ssm/:agent_id`
+- `https://api.mnemom.ai/v1/ssm/:agent_id/timeline`
+
+**Deliverable**: ✅ mnemom.ai/blog/hunter live (private testing, no links from landing)
 
 ### Phase 2.2: Rich Trace Visualization (Days 4-5)
 **Goal**: Full Braid overlay experience
