@@ -6,10 +6,17 @@
  * - GET /health - Health check
  * - GET /v1/agents/:id - Get agent by ID
  * - GET /v1/agents/:id/card - Get active alignment card for agent
+ * - POST /v1/agents/:id/claim - Claim agent with hash proof
  * - GET /v1/traces - Query traces with filters
  * - GET /v1/traces/:id - Get single trace by ID
  * - GET /v1/integrity/:agent_id - Compute integrity score
  * - GET /v1/drift/:agent_id - Get recent drift alerts
+ * - GET /v1/blog/posts - List published blog posts
+ * - GET /v1/blog/posts/:slug - Get single blog post by slug
+ * - GET /v1/blog/authors/:agent_id - Get author profile and their posts
+ * - POST /v1/blog/posts - Create blog post (service role only)
+ * - GET /v1/ssm/:agent_id - Get recent traces with similarity scores
+ * - GET /v1/ssm/:agent_id/timeline - Get similarity timeline data
  */
 
 import { detectDrift, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
@@ -22,7 +29,7 @@ export interface Env {
 // CORS headers for all responses
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
@@ -114,6 +121,94 @@ async function supabaseQuery(
   } catch (err) {
     return { data: null, error: err instanceof Error ? err.message : 'Unknown error' };
   }
+}
+
+// Supabase insert helper
+async function supabaseInsert(
+  env: Env,
+  table: string,
+  data: Record<string, unknown>
+): Promise<{ data: unknown; error: string | null }> {
+  const url = `${env.SUPABASE_URL}/rest/v1/${table}`;
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { data: null, error: errorText };
+    }
+
+    const result = await response.json();
+    return { data: result, error: null };
+  } catch (err) {
+    return { data: null, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+// Supabase update helper
+async function supabaseUpdate(
+  env: Env,
+  table: string,
+  filters: Record<string, string | number | boolean>,
+  data: Record<string, unknown>
+): Promise<{ data: unknown; error: string | null }> {
+  const url = new URL(`${env.SUPABASE_URL}/rest/v1/${table}`);
+
+  // Add filters
+  for (const [key, value] of Object.entries(filters)) {
+    url.searchParams.set(key, `eq.${value}`);
+  }
+
+  try {
+    const response = await fetch(url.toString(), {
+      method: 'PATCH',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { data: null, error: errorText };
+    }
+
+    const result = await response.json();
+    return { data: result, error: null };
+  } catch (err) {
+    return { data: null, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+// SHA-256 hash helper
+async function sha256(message: string): Promise<string> {
+  const msgBuffer = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Generate unique ID with prefix
+function generateId(prefix: string): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 8; i++) {
+    id += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return `${prefix}-${id}`;
 }
 
 // Route handlers
@@ -320,6 +415,474 @@ async function handleGetDrift(env: Env, agentId: string): Promise<Response> {
   }
 }
 
+// ============================================
+// BLOG ENDPOINTS
+// ============================================
+
+interface BlogPost {
+  id: string;
+  agent_id: string;
+  slug: string;
+  title: string;
+  subtitle?: string;
+  body: string;
+  tags: string[];
+  investigation_session_id?: string;
+  trace_ids: string[];
+  published_at?: string;
+  created_at: string;
+  updated_at: string;
+  status: string;
+  view_count: number;
+}
+
+async function handleGetBlogPosts(env: Env, url: URL): Promise<Response> {
+  const limit = parseInt(url.searchParams.get('limit') || '20', 10);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+  const agentId = url.searchParams.get('agent_id');
+
+  if (isNaN(limit) || limit < 1 || limit > 100) {
+    return errorResponse('Invalid limit parameter (must be 1-100)', 400);
+  }
+
+  if (isNaN(offset) || offset < 0) {
+    return errorResponse('Invalid offset parameter (must be >= 0)', 400);
+  }
+
+  const filters: Record<string, string | number | boolean> = {
+    status: 'published',
+  };
+
+  if (agentId) {
+    filters.agent_id = agentId;
+  }
+
+  const { data, error } = await supabaseQuery(env, 'blog_posts', {
+    select: 'id,agent_id,slug,title,subtitle,tags,published_at,created_at,view_count',
+    filters,
+    order: { column: 'published_at', ascending: false },
+    limit,
+    offset,
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  return jsonResponse({ posts: data, limit, offset });
+}
+
+async function handleGetBlogPost(env: Env, slug: string): Promise<Response> {
+  if (!slug) {
+    return errorResponse('Slug is required', 400);
+  }
+
+  // Get the post
+  const { data: postData, error: postError } = await supabaseQuery(env, 'blog_posts', {
+    filters: { slug, status: 'published' },
+    single: true,
+  });
+
+  if (postError) {
+    if (postError.includes('PGRST116') || postError.includes('0 rows')) {
+      return errorResponse('Blog post not found', 404);
+    }
+    return errorResponse(`Database error: ${postError}`, 500);
+  }
+
+  const post = postData as BlogPost;
+
+  // Get linked traces if any
+  let linkedTraces: unknown[] = [];
+  if (post.trace_ids && post.trace_ids.length > 0) {
+    // Fetch traces by IDs
+    const traceUrl = new URL(`${env.SUPABASE_URL}/rest/v1/traces`);
+    traceUrl.searchParams.set('trace_id', `in.(${post.trace_ids.join(',')})`);
+
+    try {
+      const traceResponse = await fetch(traceUrl.toString(), {
+        headers: {
+          'apikey': env.SUPABASE_KEY,
+          'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (traceResponse.ok) {
+        linkedTraces = await traceResponse.json();
+      }
+    } catch {
+      // Continue without traces if fetch fails
+    }
+  }
+
+  return jsonResponse({ post, linked_traces: linkedTraces });
+}
+
+async function handleGetBlogAuthor(env: Env, agentId: string): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  // Get agent profile
+  const { data: agentData, error: agentError } = await supabaseQuery(env, 'agents', {
+    eq: ['id', agentId],
+    single: true,
+  });
+
+  if (agentError) {
+    if (agentError.includes('PGRST116') || agentError.includes('0 rows')) {
+      return errorResponse('Author not found', 404);
+    }
+    return errorResponse(`Database error: ${agentError}`, 500);
+  }
+
+  // Get published posts by this agent
+  const { data: postsData, error: postsError } = await supabaseQuery(env, 'blog_posts', {
+    select: 'id,slug,title,subtitle,tags,published_at,view_count',
+    filters: { agent_id: agentId, status: 'published' },
+    order: { column: 'published_at', ascending: false },
+    limit: 50,
+  });
+
+  if (postsError) {
+    return errorResponse(`Database error: ${postsError}`, 500);
+  }
+
+  return jsonResponse({ author: agentData, posts: postsData });
+}
+
+async function handleCreateBlogPost(env: Env, request: Request): Promise<Response> {
+  // Verify service role authorization
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return errorResponse('Authorization required', 401);
+  }
+
+  const token = authHeader.slice(7);
+  if (token !== env.SUPABASE_KEY) {
+    return errorResponse('Invalid authorization', 403);
+  }
+
+  // Parse request body
+  let body: Partial<BlogPost>;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON body', 400);
+  }
+
+  // Validate required fields
+  if (!body.agent_id) {
+    return errorResponse('agent_id is required', 400);
+  }
+  if (!body.slug) {
+    return errorResponse('slug is required', 400);
+  }
+  if (!body.title) {
+    return errorResponse('title is required', 400);
+  }
+  if (!body.body) {
+    return errorResponse('body is required', 400);
+  }
+
+  // Validate slug format
+  if (!/^[a-z0-9-]+$/.test(body.slug)) {
+    return errorResponse('slug must contain only lowercase letters, numbers, and hyphens', 400);
+  }
+
+  // Create the post
+  const postId = generateId('bp');
+  const now = new Date().toISOString();
+
+  const postData = {
+    id: postId,
+    agent_id: body.agent_id,
+    slug: body.slug,
+    title: body.title,
+    subtitle: body.subtitle || null,
+    body: body.body,
+    tags: body.tags || [],
+    investigation_session_id: body.investigation_session_id || null,
+    trace_ids: body.trace_ids || [],
+    published_at: body.status === 'published' ? now : null,
+    created_at: now,
+    updated_at: now,
+    status: body.status || 'draft',
+    view_count: 0,
+  };
+
+  const { data, error } = await supabaseInsert(env, 'blog_posts', postData);
+
+  if (error) {
+    if (error.includes('duplicate key') || error.includes('unique constraint')) {
+      return errorResponse('A post with this slug already exists', 409);
+    }
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  return jsonResponse(data, 201);
+}
+
+// ============================================
+// CLAIMING ENDPOINT
+// ============================================
+
+async function handleClaimAgent(env: Env, agentId: string, request: Request): Promise<Response> {
+  // Parse request body
+  let body: { hash_proof: string; email?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON body', 400);
+  }
+
+  if (!body.hash_proof) {
+    return errorResponse('hash_proof is required', 400);
+  }
+
+  // Get the agent
+  const { data: agentData, error: agentError } = await supabaseQuery(env, 'agents', {
+    eq: ['id', agentId],
+    single: true,
+  });
+
+  if (agentError) {
+    if (agentError.includes('PGRST116') || agentError.includes('0 rows')) {
+      return errorResponse('Agent not found', 404);
+    }
+    return errorResponse(`Database error: ${agentError}`, 500);
+  }
+
+  const agent = agentData as { id: string; agent_hash: string; claimed_at?: string };
+
+  // Check if already claimed
+  if (agent.claimed_at) {
+    return errorResponse('Agent has already been claimed', 409);
+  }
+
+  // Verify the hash proof
+  // The agent_hash is sha256(api_key).slice(0,16)
+  // The user provides hash_proof which should hash to the agent_hash
+  const hashedProof = await sha256(body.hash_proof);
+  const truncatedHash = hashedProof.slice(0, 16);
+
+  if (truncatedHash !== agent.agent_hash) {
+    return errorResponse('Invalid hash proof', 403);
+  }
+
+  // Claim the agent
+  const now = new Date().toISOString();
+  const updateData: Record<string, unknown> = {
+    claimed_at: now,
+    claimed_by: truncatedHash, // Use hash as identifier
+  };
+
+  if (body.email) {
+    updateData.email = body.email;
+  }
+
+  const { error: updateError } = await supabaseUpdate(
+    env,
+    'agents',
+    { id: agentId },
+    updateData
+  );
+
+  if (updateError) {
+    return errorResponse(`Database error: ${updateError}`, 500);
+  }
+
+  return jsonResponse({
+    claimed: true,
+    agent_id: agentId,
+    claimed_at: now,
+  });
+}
+
+// ============================================
+// SSM (Semantic Similarity Matrix) ENDPOINTS
+// ============================================
+
+interface TraceWithSimilarity {
+  trace_id: string;
+  timestamp: string;
+  action: {
+    type: string;
+    name: string;
+    category?: string;
+  };
+  decision: {
+    selected: string;
+    values_applied: string[];
+    confidence?: number;
+  };
+  similarity_scores?: Record<string, number>;
+}
+
+// Simple cosine similarity for value overlap
+function computeValueSimilarity(values1: string[], values2: string[]): number {
+  if (!values1?.length || !values2?.length) return 0;
+
+  const set1 = new Set(values1.map(v => v.toLowerCase()));
+  const set2 = new Set(values2.map(v => v.toLowerCase()));
+
+  const intersection = [...set1].filter(v => set2.has(v)).length;
+  const union = new Set([...set1, ...set2]).size;
+
+  return union > 0 ? intersection / union : 0;
+}
+
+async function handleGetSSM(env: Env, agentId: string, url: URL): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  const limit = parseInt(url.searchParams.get('limit') || '20', 10);
+
+  if (isNaN(limit) || limit < 1 || limit > 100) {
+    return errorResponse('Invalid limit parameter (must be 1-100)', 400);
+  }
+
+  // Get recent traces
+  const { data: tracesData, error: tracesError } = await supabaseQuery(env, 'traces', {
+    select: 'trace_id,timestamp,action,decision',
+    filters: { agent_id: agentId },
+    order: { column: 'timestamp', ascending: false },
+    limit,
+  });
+
+  if (tracesError) {
+    return errorResponse(`Database error: ${tracesError}`, 500);
+  }
+
+  const traces = tracesData as Array<{
+    trace_id: string;
+    timestamp: string;
+    action: { type: string; name: string; category?: string };
+    decision: { selected: string; values_applied: string[]; confidence?: number };
+  }>;
+
+  // Compute similarity matrix
+  const tracesWithSimilarity: TraceWithSimilarity[] = traces.map((trace, i) => {
+    const similarity_scores: Record<string, number> = {};
+
+    for (let j = 0; j < traces.length; j++) {
+      if (i !== j) {
+        const otherTrace = traces[j];
+        const score = computeValueSimilarity(
+          trace.decision?.values_applied || [],
+          otherTrace.decision?.values_applied || []
+        );
+        similarity_scores[otherTrace.trace_id] = Math.round(score * 100) / 100;
+      }
+    }
+
+    return {
+      ...trace,
+      similarity_scores,
+    };
+  });
+
+  return jsonResponse({
+    agent_id: agentId,
+    trace_count: traces.length,
+    traces: tracesWithSimilarity,
+  });
+}
+
+async function handleGetSSMTimeline(env: Env, agentId: string, url: URL): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  const days = parseInt(url.searchParams.get('days') || '7', 10);
+
+  if (isNaN(days) || days < 1 || days > 30) {
+    return errorResponse('Invalid days parameter (must be 1-30)', 400);
+  }
+
+  // Get traces from the time period
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - days);
+
+  const { data: tracesData, error: tracesError } = await supabaseQuery(env, 'traces', {
+    select: 'trace_id,timestamp,decision',
+    filters: { agent_id: agentId },
+    order: { column: 'timestamp', ascending: true },
+    limit: 500,
+  });
+
+  if (tracesError) {
+    return errorResponse(`Database error: ${tracesError}`, 500);
+  }
+
+  const traces = tracesData as Array<{
+    trace_id: string;
+    timestamp: string;
+    decision: { values_applied: string[] };
+  }>;
+
+  // Filter traces within date range
+  const filteredTraces = traces.filter(t => new Date(t.timestamp) >= startDate);
+
+  // Group by day and compute average similarity within each day
+  const dailyData: Record<string, { date: string; trace_count: number; avg_similarity: number; values_used: Record<string, number> }> = {};
+
+  for (const trace of filteredTraces) {
+    const date = trace.timestamp.split('T')[0];
+
+    if (!dailyData[date]) {
+      dailyData[date] = {
+        date,
+        trace_count: 0,
+        avg_similarity: 0,
+        values_used: {},
+      };
+    }
+
+    dailyData[date].trace_count++;
+
+    // Count value usage
+    const values = trace.decision?.values_applied || [];
+    for (const value of values) {
+      dailyData[date].values_used[value] = (dailyData[date].values_used[value] || 0) + 1;
+    }
+  }
+
+  // Compute self-similarity for each day (how consistent values are within the day)
+  for (const date of Object.keys(dailyData)) {
+    const dayTraces = filteredTraces.filter(t => t.timestamp.startsWith(date));
+    if (dayTraces.length > 1) {
+      let totalSimilarity = 0;
+      let comparisons = 0;
+
+      for (let i = 0; i < dayTraces.length; i++) {
+        for (let j = i + 1; j < dayTraces.length; j++) {
+          totalSimilarity += computeValueSimilarity(
+            dayTraces[i].decision?.values_applied || [],
+            dayTraces[j].decision?.values_applied || []
+          );
+          comparisons++;
+        }
+      }
+
+      dailyData[date].avg_similarity = comparisons > 0
+        ? Math.round((totalSimilarity / comparisons) * 100) / 100
+        : 0;
+    }
+  }
+
+  // Convert to sorted array
+  const timeline = Object.values(dailyData).sort((a, b) => a.date.localeCompare(b.date));
+
+  return jsonResponse({
+    agent_id: agentId,
+    days,
+    timeline,
+  });
+}
+
 // Main request handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -333,52 +896,96 @@ export default {
 
     const url = new URL(request.url);
     const path = url.pathname;
-
-    // Only allow GET requests (except OPTIONS handled above)
-    if (request.method !== 'GET') {
-      return errorResponse('Method not allowed', 405);
-    }
+    const method = request.method;
 
     try {
       // Route matching
       // GET /health
-      if (path === '/health') {
+      if (path === '/health' && method === 'GET') {
         return handleHealth();
       }
 
       // GET /v1/agents/:id/card
       const agentCardMatch = path.match(/^\/v1\/agents\/([^/]+)\/card$/);
-      if (agentCardMatch) {
+      if (agentCardMatch && method === 'GET') {
         return handleGetAgentCard(env, agentCardMatch[1]);
+      }
+
+      // POST /v1/agents/:id/claim
+      const agentClaimMatch = path.match(/^\/v1\/agents\/([^/]+)\/claim$/);
+      if (agentClaimMatch && method === 'POST') {
+        return handleClaimAgent(env, agentClaimMatch[1], request);
       }
 
       // GET /v1/agents/:id
       const agentMatch = path.match(/^\/v1\/agents\/([^/]+)$/);
-      if (agentMatch) {
+      if (agentMatch && method === 'GET') {
         return handleGetAgent(env, agentMatch[1]);
       }
 
       // GET /v1/traces (with query params)
-      if (path === '/v1/traces') {
+      if (path === '/v1/traces' && method === 'GET') {
         return handleGetTraces(env, url);
       }
 
       // GET /v1/traces/:id
       const traceMatch = path.match(/^\/v1\/traces\/([^/]+)$/);
-      if (traceMatch) {
+      if (traceMatch && method === 'GET') {
         return handleGetTrace(env, traceMatch[1]);
       }
 
       // GET /v1/integrity/:agent_id
       const integrityMatch = path.match(/^\/v1\/integrity\/([^/]+)$/);
-      if (integrityMatch) {
+      if (integrityMatch && method === 'GET') {
         return handleGetIntegrity(env, integrityMatch[1]);
       }
 
       // GET /v1/drift/:agent_id
       const driftMatch = path.match(/^\/v1\/drift\/([^/]+)$/);
-      if (driftMatch) {
+      if (driftMatch && method === 'GET') {
         return handleGetDrift(env, driftMatch[1]);
+      }
+
+      // ============================================
+      // BLOG ROUTES
+      // ============================================
+
+      // GET /v1/blog/posts - List published posts
+      if (path === '/v1/blog/posts' && method === 'GET') {
+        return handleGetBlogPosts(env, url);
+      }
+
+      // POST /v1/blog/posts - Create post (service role only)
+      if (path === '/v1/blog/posts' && method === 'POST') {
+        return handleCreateBlogPost(env, request);
+      }
+
+      // GET /v1/blog/posts/:slug - Get single post by slug
+      const blogPostMatch = path.match(/^\/v1\/blog\/posts\/([^/]+)$/);
+      if (blogPostMatch && method === 'GET') {
+        return handleGetBlogPost(env, blogPostMatch[1]);
+      }
+
+      // GET /v1/blog/authors/:agent_id - Get author profile and posts
+      const blogAuthorMatch = path.match(/^\/v1\/blog\/authors\/([^/]+)$/);
+      if (blogAuthorMatch && method === 'GET') {
+        return handleGetBlogAuthor(env, blogAuthorMatch[1]);
+      }
+
+      // ============================================
+      // SSM ROUTES
+      // ============================================
+
+      // GET /v1/ssm/:agent_id/timeline - Get similarity timeline
+      const ssmTimelineMatch = path.match(/^\/v1\/ssm\/([^/]+)\/timeline$/);
+      if (ssmTimelineMatch && method === 'GET') {
+        return handleGetSSMTimeline(env, ssmTimelineMatch[1], url);
+      }
+
+      // GET /v1/ssm/:agent_id - Get traces with similarity scores
+      const ssmMatch = path.match(/^\/v1\/ssm\/([^/]+)$/);
+      if (ssmMatch && method === 'GET') {
+        return handleGetSSM(env, ssmMatch[1], url);
       }
 
       // 404 for unmatched routes

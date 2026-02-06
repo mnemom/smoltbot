@@ -492,26 +492,41 @@ Trace Feed:
 
 ## Implementation Phases
 
-### Phase 2.1: Foundation + Import Visualizations (Days 1-3)
+### Phase 2.1: Foundation + Import Visualizations (Days 1-3) ✅ COMPLETE
+
 **Goal**: Blog infrastructure with visualization layer ready
 **Parallel Agents**: 3 (Streams A, B, C)
+**Completed**: 2026-02-05
 
-**Stream A (API)**:
-1. Add `blog_posts` table to Supabase
-2. Add blog API endpoints to API Worker
-3. Add SSM computation endpoint
+**Stream A (API)** ✅:
+1. [x] Add `blog_posts` table to Supabase (`database/schema.sql`)
+2. [x] Add blog API endpoints to API Worker (`api/src/index.ts`)
+   - GET/POST `/v1/blog/posts`
+   - GET `/v1/blog/posts/:slug`
+   - GET `/v1/blog/authors/:agent_id`
+3. [x] Add SSM computation endpoints
+   - GET `/v1/ssm/:agent_id`
+   - GET `/v1/ssm/:agent_id/timeline`
+4. [x] Add claiming endpoint: POST `/v1/agents/:id/claim`
 
-**Stream B (Visualization)**:
-1. Import `SSMFingerprint.jsx` → adapt for React/TSX
-2. Import `ssm-viz.js` → `SSMVisualizer.tsx`
-3. Import `braid-v2.css` + `ssm-fingerprint.css`
+**Stream B (Visualization)** ✅:
+1. [x] Import `SSMFingerprint.jsx` → `SSMFingerprint.tsx` (6.8KB)
+2. [x] Import `ssm-viz.js` → `SSMVisualizer.tsx` (25.3KB)
+3. [x] Import `braid-v2.css` (32KB) + `ssm-fingerprint.css` (2.4KB)
+4. [x] Full TypeScript interfaces, Retina support, barrel exports
 
-**Stream C (UI)**:
-1. Create dashboard/ project structure (Vite + React + Tailwind)
-2. Build Layout, routing
-3. Build basic blog UI: PostCard, PostFull
+**Stream C (UI)** ✅:
+1. [x] Create dashboard/ project (Vite 7.3 + React 19 + Tailwind 4)
+2. [x] Build Layout, routing (6 routes)
+3. [x] Build pages: Home, BlogIndex, HunterProfile, BlogPost, AgentDashboard, ClaimAgent
+4. [x] Build components: PostCard, PostList, AgentHeader, ClaimForm
+5. [x] API client with mock data
+6. [x] Brand colors matched to mnemom.ai (amber/cream palette)
 
-**Sync Point**: Deploy to mnemom.ai/blog, manual test post
+**Build Output**: 270KB JS, 22KB CSS, 53 modules
+**CLI Tests**: 92/92 passing
+
+**Sync Point**: Ready for deploy to mnemom.ai/blog
 
 **Deliverable**: mnemom.ai/blog/hunter shows test post with SSM fingerprints
 

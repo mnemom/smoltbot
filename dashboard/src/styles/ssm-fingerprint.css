@@ -1,0 +1,118 @@
+/* SSM Cognitive Fingerprint - Phase 6 SIF Visualization */
+
+.ssm-fingerprint {
+    display: inline-block;
+    position: relative;
+    cursor: default;
+    border-radius: 4px;
+    overflow: visible;
+    vertical-align: middle;
+    margin-left: var(--space-2);
+    transition: box-shadow 0.2s ease;
+}
+
+.ssm-fingerprint:hover {
+    box-shadow: 0 0 8px rgba(77, 163, 255, 0.3);
+}
+
+.ssm-fingerprint--thumbnail {
+    width: 32px;
+    height: 16px;
+    display: block;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.ssm-fingerprint--tooltip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    z-index: 1000;
+    width: 220px;
+    padding: var(--space-2);
+    background: var(--bg-2);
+    border: 1px solid var(--stroke-2);
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+}
+
+/* When near the top of the viewport, show tooltip below instead */
+.ssm-fingerprint--tooltip-below {
+    bottom: auto;
+    top: calc(100% + 8px);
+}
+
+.ssm-fingerprint__canvas {
+    display: block;
+    image-rendering: pixelated;
+    border-radius: 4px;
+}
+
+.ssm-fingerprint__label {
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    color: var(--text-3);
+    margin-top: var(--space-1);
+    text-align: center;
+}
+
+/* Mount point styling - prevent layout shift when no SSM data */
+.ssm-fingerprint-mount:empty {
+    display: none;
+}
+
+/* ============================================
+   SSM Visualizer Styles
+   ============================================ */
+
+.ssm-visualizer {
+    display: inline-block;
+    position: relative;
+}
+
+.ssm-canvas {
+    display: block;
+}
+
+/* Tooltip styles for SSMVisualizer */
+.ssm-tooltip {
+    background: var(--bg-2, #111A26);
+    border: 1px solid var(--stroke-2, #24384E);
+    border-radius: 6px;
+    padding: 8px 12px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    font-size: 0.8125rem;
+    z-index: 1000;
+}
+
+.ssm-tooltip-title {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.75rem;
+    color: var(--text-2, #B8C7D9);
+    margin-bottom: 4px;
+}
+
+.ssm-tooltip-value {
+    color: var(--text-1, #E7EEF8);
+}
+
+.ssm-tooltip-value strong {
+    font-family: var(--font-mono, monospace);
+}
+
+.ssm-tooltip-value.below-threshold {
+    color: #ff6b6b;
+}
+
+.ssm-tooltip-warning {
+    font-size: 0.6875rem;
+    color: #ff6b6b;
+    margin-top: 4px;
+}
+
+.ssm-tooltip-meta {
+    font-size: 0.6875rem;
+    color: var(--text-4, #4A5A6B);
+    margin-top: 4px;
+}

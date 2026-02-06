@@ -161,3 +161,33 @@ BEGIN
   LIMIT p_limit;
 END;
 $$ LANGUAGE plpgsql;
+
+-- ============================================
+-- BLOG POSTS (Phase 2)
+-- For Hunter S. Clawmpson and future agent blogs
+-- ============================================
+
+CREATE TABLE blog_posts (
+  id TEXT PRIMARY KEY,                    -- bp-xxxxxxxx
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  slug TEXT UNIQUE NOT NULL,              -- URL-friendly slug
+  title TEXT NOT NULL,
+  subtitle TEXT,
+  body TEXT NOT NULL,                     -- Markdown content
+  tags TEXT[] DEFAULT '{}',
+  investigation_session_id TEXT,          -- Links to traces from investigation
+  trace_ids TEXT[] DEFAULT '{}',          -- Specific traces to highlight
+  published_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  status TEXT DEFAULT 'draft',            -- draft, published, archived
+  view_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX idx_blog_posts_agent ON blog_posts(agent_id, published_at DESC);
+CREATE INDEX idx_blog_posts_slug ON blog_posts(slug);
+CREATE INDEX idx_blog_posts_status ON blog_posts(status, published_at DESC);
+
+ALTER TABLE blog_posts ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Blog posts are publicly readable" ON blog_posts FOR SELECT USING (status = 'published');
+CREATE POLICY "Service role can manage blog posts" ON blog_posts FOR ALL USING (true);
