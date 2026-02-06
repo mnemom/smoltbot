@@ -97,7 +97,9 @@ export function TraceFeed({
           throw new Error(`API error: ${response.status}`);
         }
 
-        const data: APTrace[] = await response.json();
+        const json = await response.json();
+        // Handle both { traces: [...] } and raw array formats
+        const data: APTrace[] = Array.isArray(json) ? json : (json.traces || []);
 
         if (data.length < limit) {
           setHasMore(false);
@@ -109,7 +111,12 @@ export function TraceFeed({
           setTraces(data);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to fetch traces');
+        // Fallback to empty array on error - AgentDashboard handles mock data
+        console.warn('API unavailable for trace feed');
+        setHasMore(false);
+        if (!append) {
+          setTraces([]);
+        }
       } finally {
         setLoading(false);
       }
