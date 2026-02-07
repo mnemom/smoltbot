@@ -32,3 +32,6 @@ logs/
 .claude/
 .foundry/
 .mcp.json
+
+# Internal design docs
+architecture/
