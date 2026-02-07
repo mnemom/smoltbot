@@ -27,6 +27,7 @@ export interface Env {
   SUPABASE_URL: string;
   SUPABASE_KEY: string;
   SUPABASE_JWT_SECRET: string;
+  MNEMOM_PUBLISH_KEY: string;
 }
 
 // CORS headers for all responses
@@ -718,7 +719,7 @@ async function handleCreateBlogPost(env: Env, request: Request): Promise<Respons
   }
 
   const token = authHeader.slice(7);
-  if (token !== env.SUPABASE_KEY) {
+  if (token !== env.SUPABASE_KEY && token !== env.MNEMOM_PUBLISH_KEY) {
     return errorResponse('Invalid authorization', 403);
   }
 
