@@ -7,7 +7,7 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["@cloudflare/workers-types", "@mnemom/agent-alignment-protocol"]
+    "types": ["@cloudflare/workers-types"]
   },
   "include": ["src/**/*"],
   "exclude": ["src/__tests__/**"]
