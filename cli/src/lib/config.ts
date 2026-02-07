@@ -43,3 +43,13 @@ export function generateAgentId(): string {
   const randomHex = crypto.randomBytes(4).toString("hex");
   return `smolt-${randomHex}`;
 }
+
+/**
+ * Derive agent ID deterministically from an API key.
+ * Uses the same SHA-256 hashing as the gateway so IDs match.
+ */
+export function deriveAgentId(apiKey: string): string {
+  const hash = crypto.createHash("sha256").update(apiKey).digest("hex");
+  const agentHash = hash.substring(0, 16);
+  return `smolt-${agentHash.slice(0, 8)}`;
+}
