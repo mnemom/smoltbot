@@ -71,6 +71,13 @@ interface HaikuAnalysis {
   confidence: 'high' | 'medium' | 'low';
 }
 
+interface ExtractedContext {
+  thinking: string | null;
+  toolCalls: Array<{ name: string; input: Record<string, unknown> }>;
+  userQuery: string | null;
+  responseText: string | null;
+}
+
 interface ProcessingStats {
   processed: number;
   skipped: number;
@@ -234,20 +241,24 @@ async function processLog(
 
   console.log(`[observer] Processing log ${log.id} for agent ${agent_id}`);
 
-  // Fetch full response body
-  const responseBody = await fetchResponseBody(log.id, env);
+  // Fetch full request + response bodies
+  const bodies = await fetchLogBodies(log.id, env);
 
-  // Extract thinking blocks from response
-  const thinking = extractThinking(responseBody);
+  // Extract thinking, tool calls, user query, response text
+  const context = extractContext(bodies.request, bodies.response);
+
+  console.log(
+    `[observer] Extracted: thinking=${!!context.thinking}, tools=${context.toolCalls.length}, query=${!!context.userQuery}`
+  );
 
   // Analyze reasoning with Claude Haiku
-  const analysis = await analyzeWithHaiku(thinking, env);
+  const analysis = await analyzeWithHaiku(context, env);
 
   // Fetch active alignment card for this agent
   const card = await fetchCard(agent_id, env);
 
   // Build APTrace conformant trace object
-  const trace = buildTrace(log, metadata, thinking, analysis, card);
+  const trace = buildTrace(log, metadata, context, analysis, card);
 
   // Verify trace against alignment card using AAP SDK
   const verification = card ? verifyTrace(trace, card) : null;
@@ -306,9 +317,12 @@ async function fetchLogs(env: Env, limit: number = 50): Promise<GatewayLog[]> {
 }
 
 /**
- * Fetch the full response body for a specific log entry
+ * Fetch full request and response bodies for a specific log entry
  */
-async function fetchResponseBody(logId: string, env: Env): Promise<string> {
+async function fetchLogBodies(
+  logId: string,
+  env: Env
+): Promise<{ request: string; response: string }> {
   const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai-gateway/gateways/${env.GATEWAY_ID}/logs/${logId}`;
 
   const response = await fetch(url, {
@@ -319,8 +333,8 @@ async function fetchResponseBody(logId: string, env: Env): Promise<string> {
   });
 
   if (!response.ok) {
-    console.warn(`[observer] Failed to fetch response body for ${logId}`);
-    return '';
+    console.warn(`[observer] Failed to fetch log bodies for ${logId}`);
+    return { request: '', response: '' };
   }
 
   const data = (await response.json()) as {
@@ -328,7 +342,10 @@ async function fetchResponseBody(logId: string, env: Env): Promise<string> {
     result: GatewayLogDetail;
   };
 
-  return data.result?.response_body || '';
+  return {
+    request: data.result?.request_body || '',
+    response: data.result?.response_body || '',
+  };
 }
 
 /**
@@ -359,43 +376,189 @@ async function deleteLog(logId: string, env: Env): Promise<void> {
 }
 
 // ============================================================================
-// Thinking Extraction
+// Context Extraction
 // ============================================================================
 
 /**
- * Extract thinking blocks from model response
- * Supports both <think> and <thinking> tags
+ * Extract thinking, tool calls, user query, and response text from
+ * raw request/response bodies. Handles both JSON and SSE streaming formats.
  */
-function extractThinking(response: string): string | null {
-  if (!response) {
-    return null;
-  }
+function extractContext(requestBody: string, responseBody: string): ExtractedContext {
+  const result: ExtractedContext = {
+    thinking: null,
+    toolCalls: [],
+    userQuery: null,
+    responseText: null,
+  };
 
-  const patterns = [
-    /<think>([\s\S]*?)<\/think>/gi,
-    /<thinking>([\s\S]*?)<\/thinking>/gi,
-  ];
-
-  const blocks: string[] = [];
-
-  for (const pattern of patterns) {
-    let match;
-    // Reset lastIndex for global regex
-    pattern.lastIndex = 0;
-    while ((match = pattern.exec(response)) !== null) {
-      const content = match[1].trim();
-      if (content) {
-        blocks.push(content);
-      }
+  // --- Parse response (try JSON first, then SSE) ---
+  if (responseBody) {
+    const parsed = tryParseResponseJSON(responseBody) || tryParseSSE(responseBody);
+    if (parsed) {
+      result.thinking = parsed.thinking;
+      result.toolCalls = parsed.toolCalls;
+      result.responseText = parsed.responseText;
     }
   }
 
-  if (blocks.length === 0) {
-    return null;
+  // --- Parse request for user query ---
+  if (requestBody) {
+    result.userQuery = extractUserQuery(requestBody);
   }
 
-  // Join multiple thinking blocks with separator
-  return blocks.join('\n\n---\n\n');
+  return result;
+}
+
+/**
+ * Try to parse response as a complete JSON message (non-streaming)
+ */
+function tryParseResponseJSON(
+  body: string
+): { thinking: string | null; toolCalls: ExtractedContext['toolCalls']; responseText: string | null } | null {
+  try {
+    const response = JSON.parse(body);
+    const content = response.content;
+    if (!Array.isArray(content)) return null;
+    return extractFromContentBlocks(content);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Try to parse response as SSE streaming events.
+ * Reconstructs content blocks from content_block_start + content_block_delta events.
+ */
+function tryParseSSE(
+  body: string
+): { thinking: string | null; toolCalls: ExtractedContext['toolCalls']; responseText: string | null } | null {
+  if (!body.includes('data: ')) return null;
+
+  try {
+    // Track content blocks by index
+    const blocks: Map<number, { type: string; content: string; name?: string; input?: string }> = new Map();
+
+    const lines = body.split('\n');
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const jsonStr = line.slice(6).trim();
+      if (!jsonStr || jsonStr === '[DONE]') continue;
+
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(jsonStr);
+      } catch {
+        continue;
+      }
+
+      const eventType = event.type as string;
+
+      if (eventType === 'content_block_start') {
+        const index = event.index as number;
+        const block = event.content_block as Record<string, unknown>;
+        blocks.set(index, {
+          type: block.type as string,
+          content: '',
+          name: block.name as string | undefined,
+          input: '',
+        });
+      } else if (eventType === 'content_block_delta') {
+        const index = event.index as number;
+        const delta = event.delta as Record<string, unknown>;
+        const existing = blocks.get(index);
+        if (!existing) continue;
+
+        if (delta.type === 'thinking_delta') {
+          existing.content += (delta.thinking as string) || '';
+        } else if (delta.type === 'text_delta') {
+          existing.content += (delta.text as string) || '';
+        } else if (delta.type === 'input_json_delta') {
+          existing.input = (existing.input || '') + ((delta.partial_json as string) || '');
+        }
+      }
+    }
+
+    if (blocks.size === 0) return null;
+
+    // Convert accumulated blocks to content block format
+    const contentBlocks = Array.from(blocks.values()).map((b) => {
+      if (b.type === 'thinking') {
+        return { type: 'thinking', thinking: b.content };
+      } else if (b.type === 'tool_use') {
+        let input = {};
+        try { input = JSON.parse(b.input || '{}'); } catch { /* */ }
+        return { type: 'tool_use', name: b.name, input };
+      } else {
+        return { type: 'text', text: b.content };
+      }
+    });
+
+    return extractFromContentBlocks(contentBlocks);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract thinking, tool calls, and text from parsed content blocks
+ */
+function extractFromContentBlocks(
+  content: Array<Record<string, unknown>>
+): { thinking: string | null; toolCalls: ExtractedContext['toolCalls']; responseText: string | null } {
+  const thinkingBlocks: string[] = [];
+  const toolCalls: ExtractedContext['toolCalls'] = [];
+  const textBlocks: string[] = [];
+
+  for (const block of content) {
+    if (block.type === 'thinking' && block.thinking) {
+      thinkingBlocks.push(block.thinking as string);
+    } else if (block.type === 'tool_use' && block.name) {
+      toolCalls.push({
+        name: block.name as string,
+        input: (block.input as Record<string, unknown>) || {},
+      });
+    } else if (block.type === 'text' && block.text) {
+      textBlocks.push(block.text as string);
+    }
+  }
+
+  return {
+    thinking: thinkingBlocks.length > 0 ? thinkingBlocks.join('\n\n---\n\n') : null,
+    toolCalls,
+    responseText: textBlocks.length > 0 ? textBlocks.join('\n\n') : null,
+  };
+}
+
+/**
+ * Extract the user's query from the request body
+ */
+function extractUserQuery(requestBody: string): string | null {
+  try {
+    const request = JSON.parse(requestBody);
+    const messages = request.messages;
+    if (!Array.isArray(messages)) return null;
+
+    // Get the last user message
+    const lastUserMsg = [...messages].reverse().find(
+      (m: Record<string, unknown>) => m.role === 'user'
+    );
+    if (!lastUserMsg) return null;
+
+    const content = lastUserMsg.content;
+    if (typeof content === 'string') {
+      return content.substring(0, 500);
+    }
+    if (Array.isArray(content)) {
+      return content
+        .filter((c: Record<string, unknown>) => c.type === 'text')
+        .map((c: Record<string, unknown>) => c.text as string)
+        .join('\n')
+        .substring(0, 500);
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ============================================================================
@@ -403,20 +566,43 @@ function extractThinking(response: string): string | null {
 // ============================================================================
 
 /**
- * Analyze reasoning with Claude Haiku to extract decision structure
+ * Analyze reasoning with Claude Haiku to extract decision structure.
+ * Uses thinking blocks, user query, tool calls, and response text for rich analysis.
  */
 async function analyzeWithHaiku(
-  thinking: string | null,
+  context: ExtractedContext,
   env: Env
 ): Promise<HaikuAnalysis> {
-  // Default analysis when no thinking is available
-  if (!thinking) {
+  // Build context sections for analysis
+  const sections: string[] = [];
+
+  if (context.userQuery) {
+    sections.push(`<user_query>\n${context.userQuery}\n</user_query>`);
+  }
+
+  if (context.thinking) {
+    sections.push(`<reasoning>\n${context.thinking.substring(0, 3000)}\n</reasoning>`);
+  }
+
+  if (context.toolCalls.length > 0) {
+    const toolSummary = context.toolCalls
+      .map((t) => `- ${t.name}(${Object.keys(t.input).join(', ')})`)
+      .join('\n');
+    sections.push(`<tools_used>\n${toolSummary}\n</tools_used>`);
+  }
+
+  if (context.responseText) {
+    sections.push(`<response_excerpt>\n${context.responseText.substring(0, 1000)}\n</response_excerpt>`);
+  }
+
+  // If we have no context at all, return minimal fallback
+  if (sections.length === 0) {
     return {
-      alternatives: [{ id: 'direct', description: 'Direct response without explicit reasoning' }],
+      alternatives: [{ id: 'direct', description: 'Direct response — no request/response data available' }],
       selected: 'direct',
-      reasoning: 'No explicit reasoning captured in response',
+      reasoning: 'No request or response data captured',
       values_applied: ['transparency'],
-      confidence: 'medium',
+      confidence: 'low',
     };
   }
 
@@ -429,31 +615,29 @@ async function analyzeWithHaiku(
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-3-haiku-20240307',
+        model: 'claude-3-5-haiku-20241022',
         max_tokens: 1024,
         messages: [
           {
             role: 'user',
-            content: `Analyze this AI reasoning and extract the decision structure. Return ONLY valid JSON with no additional text.
+            content: `Analyze this AI agent interaction and extract the decision structure. Return ONLY valid JSON.
 
-<reasoning>
-${thinking.substring(0, 4000)}
-</reasoning>
+${sections.join('\n\n')}
 
 Return this exact JSON structure:
 {
   "alternatives": [{"id": "short_id", "description": "what this option does"}],
   "selected": "id of the chosen option",
-  "reasoning": "why this option was chosen (1-2 sentences)",
-  "values_applied": ["transparency", "accuracy", "helpfulness", etc],
+  "reasoning": "1-2 sentence summary of what the agent did and why",
+  "values_applied": ["transparency", "accuracy", "helpfulness", "safety", "autonomy", "honesty"],
   "confidence": "high" | "medium" | "low"
 }
 
 Guidelines:
-- Extract actual alternatives the AI considered, or infer likely ones
-- Identify the approach that was selected
-- List values that seem to have influenced the decision
-- Assess confidence based on clarity of reasoning`,
+- Extract actual alternatives considered from the reasoning, or infer likely ones from the query
+- "reasoning" should describe what happened in plain English (e.g. "Edited config file to fix auth bug" not "The AI processed the request")
+- List values that influenced the decision (pick from: transparency, accuracy, helpfulness, safety, autonomy, honesty, or add custom)
+- confidence: high = clear reasoning with explicit tradeoffs, medium = reasonable but implicit, low = minimal context`,
           },
         ],
       }),
@@ -487,12 +671,18 @@ Guidelines:
   } catch (error) {
     console.error('[observer] Haiku analysis failed:', error);
 
-    // Return fallback analysis
+    // Return fallback with whatever context we have
+    const fallbackReasoning = context.toolCalls.length > 0
+      ? `Used tools: ${context.toolCalls.map((t) => t.name).join(', ')}`
+      : context.responseText
+        ? context.responseText.substring(0, 100)
+        : 'Analysis failed — reasoning could not be structured';
+
     return {
-      alternatives: [{ id: 'analyzed', description: 'Reasoning was present but analysis failed' }],
+      alternatives: [{ id: 'analyzed', description: 'Analysis attempted but extraction failed' }],
       selected: 'analyzed',
-      reasoning: 'Analysis failed - reasoning was present but could not be structured',
-      values_applied: [],
+      reasoning: fallbackReasoning,
+      values_applied: ['transparency'],
       confidence: 'low',
     };
   }
@@ -697,26 +887,36 @@ async function storeDriftAlert(
 function buildTrace(
   log: GatewayLog,
   metadata: GatewayMetadata,
-  thinking: string | null,
+  context: ExtractedContext,
   analysis: HaikuAnalysis,
   card: AlignmentCard | null
 ): APTrace {
   // Derive trace_id from log.id for idempotency - same log = same trace
   const traceId = `tr-${log.id.slice(-8)}`;
 
+  // Build action name — prefer tool names, fall back to model
+  let actionName = log.model || 'unknown';
+  if (context.toolCalls.length > 0) {
+    actionName = context.toolCalls.map((t) => t.name).join(', ');
+  }
+
   // Build action object per AAP SDK Action interface
   const action: Action = {
-    type: 'execute',  // ActionType: "recommend" | "execute" | "escalate" | "deny"
-    name: log.model || 'unknown',
-    category: 'bounded',  // ActionCategory: "bounded" | "escalation_trigger" | "forbidden"
+    type: 'execute',
+    name: actionName,
+    category: 'bounded',
     target: {
       type: 'api',
-      identifier: 'anthropic',
+      identifier: log.provider || 'anthropic',
     },
     parameters: {
       tokens_in: log.tokens_in,
       tokens_out: log.tokens_out,
       duration_ms: log.duration,
+      model: log.model,
+      ...(context.toolCalls.length > 0 && {
+        tools: context.toolCalls.map((t) => t.name),
+      }),
     },
   };
 
@@ -750,7 +950,6 @@ function buildTrace(
     decision,
     escalation,
 
-    // Context field for session, conversation, and metadata
     context: {
       session_id: metadata.session_id,
       conversation_turn: 1,
@@ -759,9 +958,10 @@ function buildTrace(
         provider: log.provider,
       },
       metadata: {
-        raw_thinking: thinking,
+        has_thinking: !!context.thinking,
         gateway_log_id: log.id,
         success: log.success,
+        tool_count: context.toolCalls.length,
         result_summary: `${log.tokens_out} tokens generated in ${log.duration}ms`,
       },
     },
