@@ -17,6 +17,8 @@
  * - POST /v1/blog/posts - Create blog post (service role only)
  * - GET /v1/ssm/:agent_id - Get recent traces with similarity scores
  * - GET /v1/ssm/:agent_id/timeline - Get similarity timeline data
+ * - POST /v1/agents/:id/link - Link claimed agent to authenticated user
+ * - GET /v1/auth/me - Get authenticated user info and linked agents
  */
 
 import { detectDrift, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
@@ -24,6 +26,7 @@ import { detectDrift, type APTrace, type AlignmentCard } from '@mnemom/agent-ali
 export interface Env {
   SUPABASE_URL: string;
   SUPABASE_KEY: string;
+  SUPABASE_JWT_SECRET: string;
 }
 
 // CORS headers for all responses
@@ -201,6 +204,122 @@ async function sha256(message: string): Promise<string> {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// JWT verification (Supabase Auth tokens, ES256 / ECDSA P-256)
+interface JWTPayload {
+  sub: string;
+  email?: string;
+  role?: string;
+  exp: number;
+  iat: number;
+}
+
+interface JWK {
+  kty: string;
+  crv: string;
+  x: string;
+  y: string;
+  kid: string;
+}
+
+function base64UrlDecode(str: string): Uint8Array {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (str.length % 4) str += '=';
+  const binary = atob(str);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+// Cache the imported key
+let cachedVerifyKey: CryptoKey | null = null;
+
+async function getVerifyKey(env: Env): Promise<CryptoKey> {
+  if (cachedVerifyKey) return cachedVerifyKey;
+
+  // Fetch JWKS from Supabase
+  const res = await fetch(`${env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`, {
+    headers: { apikey: env.SUPABASE_KEY },
+  });
+  const jwks = await res.json() as { keys: JWK[] };
+  const jwk = jwks.keys[0];
+
+  cachedVerifyKey = await crypto.subtle.importKey(
+    'jwk',
+    { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, ext: true, key_ops: ['verify'] },
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['verify'],
+  );
+
+  return cachedVerifyKey;
+}
+
+async function verifyJWT(token: string, env: Env): Promise<JWTPayload | null> {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+
+    const [headerB64, payloadB64, signatureB64] = parts;
+
+    // Decode header to check algorithm
+    const header = JSON.parse(new TextDecoder().decode(base64UrlDecode(headerB64)));
+
+    let valid: boolean;
+
+    if (header.alg === 'ES256') {
+      // ECDSA verification with public key from JWKS
+      const key = await getVerifyKey(env);
+      // ES256 signatures need to be converted from DER to raw (r||s) format
+      // Supabase JWTs use raw format already (64 bytes for P-256)
+      valid = await crypto.subtle.verify(
+        { name: 'ECDSA', hash: 'SHA-256' },
+        key,
+        base64UrlDecode(signatureB64),
+        new TextEncoder().encode(`${headerB64}.${payloadB64}`),
+      );
+    } else if (header.alg === 'HS256') {
+      // HMAC fallback for legacy tokens
+      const key = await crypto.subtle.importKey(
+        'raw',
+        new TextEncoder().encode(env.SUPABASE_JWT_SECRET),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['verify'],
+      );
+      valid = await crypto.subtle.verify(
+        'HMAC',
+        key,
+        base64UrlDecode(signatureB64),
+        new TextEncoder().encode(`${headerB64}.${payloadB64}`),
+      );
+    } else {
+      return null;
+    }
+
+    if (!valid) return null;
+
+    const payload: JWTPayload = JSON.parse(
+      new TextDecoder().decode(base64UrlDecode(payloadB64)),
+    );
+
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function getAuthUser(request: Request, env: Env): Promise<JWTPayload | null> {
+  const authHeader = request.headers.get('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) return null;
+  return verifyJWT(authHeader.slice(7), env);
+}
+
 // Generate unique ID with prefix
 function generateId(prefix: string): string {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -216,7 +335,7 @@ async function handleHealth(): Promise<Response> {
   return jsonResponse({ status: 'ok' });
 }
 
-async function handleGetAgent(env: Env, agentId: string): Promise<Response> {
+async function handleGetAgent(env: Env, agentId: string, request: Request): Promise<Response> {
   if (!agentId) {
     return errorResponse('Agent ID is required', 400);
   }
@@ -231,6 +350,22 @@ async function handleGetAgent(env: Env, agentId: string): Promise<Response> {
       return errorResponse('Agent not found', 404);
     }
     return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const agent = data as Record<string, unknown>;
+
+  // If agent is claimed and has an owner, check if requester is the owner
+  if (agent.user_id) {
+    const user = await getAuthUser(request, env);
+    if (!user || user.sub !== agent.user_id) {
+      return jsonResponse({
+        id: agent.id,
+        created_at: agent.created_at,
+        claimed: true,
+        private: true,
+        message: 'This agent exists but traces are private.',
+      });
+    }
   }
 
   return jsonResponse(data);
@@ -257,7 +392,7 @@ async function handleGetAgentCard(env: Env, agentId: string): Promise<Response> 
   return jsonResponse(data);
 }
 
-async function handleGetTraces(env: Env, url: URL): Promise<Response> {
+async function handleGetTraces(env: Env, url: URL, request: Request): Promise<Response> {
   const agentId = url.searchParams.get('agent_id');
   const limit = parseInt(url.searchParams.get('limit') || '50', 10);
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
@@ -268,6 +403,24 @@ async function handleGetTraces(env: Env, url: URL): Promise<Response> {
 
   if (isNaN(offset) || offset < 0) {
     return errorResponse('Invalid offset parameter (must be >= 0)', 400);
+  }
+
+  // If filtering by agent_id, check ownership for claimed agents
+  if (agentId) {
+    const { data: agentData } = await supabaseQuery(env, 'agents', {
+      eq: ['id', agentId],
+      select: 'id,user_id',
+      single: true,
+    });
+    if (agentData) {
+      const agent = agentData as { user_id?: string };
+      if (agent.user_id) {
+        const user = await getAuthUser(request, env);
+        if (!user || user.sub !== agent.user_id) {
+          return jsonResponse({ traces: [], limit, offset, private: true });
+        }
+      }
+    }
   }
 
   const filters: Record<string, string | number | boolean> = {};
@@ -662,12 +815,12 @@ async function handleClaimAgent(env: Env, agentId: string, request: Request): Pr
   }
 
   // Verify the hash proof
-  // The agent_hash is sha256(api_key).slice(0,16)
-  // The user provides hash_proof which should hash to the agent_hash
-  const hashedProof = await sha256(body.hash_proof);
-  const truncatedHash = hashedProof.slice(0, 16);
+  // The user submits sha256(api_key) — a 64-char hex string
+  // The stored agent_hash is sha256(api_key).slice(0,16)
+  // Compare first 16 chars of the proof against the stored hash
+  const truncatedProof = body.hash_proof.slice(0, 16);
 
-  if (truncatedHash !== agent.agent_hash) {
+  if (truncatedProof !== agent.agent_hash) {
     return errorResponse('Invalid hash proof', 403);
   }
 
@@ -675,7 +828,7 @@ async function handleClaimAgent(env: Env, agentId: string, request: Request): Pr
   const now = new Date().toISOString();
   const updateData: Record<string, unknown> = {
     claimed_at: now,
-    claimed_by: truncatedHash, // Use hash as identifier
+    claimed_by: truncatedProof, // Use hash as identifier
   };
 
   if (body.email) {
@@ -697,6 +850,87 @@ async function handleClaimAgent(env: Env, agentId: string, request: Request): Pr
     claimed: true,
     agent_id: agentId,
     claimed_at: now,
+  });
+}
+
+// ============================================
+// AUTH ENDPOINTS
+// ============================================
+
+async function handleLinkAgent(env: Env, agentId: string, request: Request): Promise<Response> {
+  const user = await getAuthUser(request, env);
+  if (!user) {
+    return errorResponse('Authentication required', 401);
+  }
+
+  let body: { hash_proof: string };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON body', 400);
+  }
+
+  if (!body.hash_proof) {
+    return errorResponse('hash_proof is required', 400);
+  }
+
+  const { data: agentData, error: agentError } = await supabaseQuery(env, 'agents', {
+    eq: ['id', agentId],
+    single: true,
+  });
+
+  if (agentError) {
+    if (agentError.includes('PGRST116') || agentError.includes('0 rows')) {
+      return errorResponse('Agent not found', 404);
+    }
+    return errorResponse(`Database error: ${agentError}`, 500);
+  }
+
+  const agent = agentData as { id: string; agent_hash: string; user_id?: string };
+
+  // Verify hash proof
+  const truncatedProof = body.hash_proof.slice(0, 16);
+  if (truncatedProof !== agent.agent_hash) {
+    return errorResponse('Invalid hash proof', 403);
+  }
+
+  // Check if already linked to a different user
+  if (agent.user_id && agent.user_id !== user.sub) {
+    return errorResponse('Agent is already linked to another account', 409);
+  }
+
+  const { error: updateError } = await supabaseUpdate(
+    env,
+    'agents',
+    { id: agentId },
+    { user_id: user.sub, email: user.email || null },
+  );
+
+  if (updateError) {
+    return errorResponse(`Database error: ${updateError}`, 500);
+  }
+
+  return jsonResponse({ linked: true, agent_id: agentId, user_id: user.sub });
+}
+
+async function handleGetMe(env: Env, request: Request): Promise<Response> {
+  const user = await getAuthUser(request, env);
+  if (!user) {
+    return errorResponse('Authentication required', 401);
+  }
+
+  const { data: agents, error } = await supabaseQuery(env, 'agents', {
+    filters: { user_id: user.sub },
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  return jsonResponse({
+    user_id: user.sub,
+    email: user.email,
+    agents: agents || [],
   });
 }
 
@@ -917,15 +1151,26 @@ export default {
         return handleClaimAgent(env, agentClaimMatch[1], request);
       }
 
+      // POST /v1/agents/:id/link
+      const agentLinkMatch = path.match(/^\/v1\/agents\/([^/]+)\/link$/);
+      if (agentLinkMatch && method === 'POST') {
+        return handleLinkAgent(env, agentLinkMatch[1], request);
+      }
+
+      // GET /v1/auth/me
+      if (path === '/v1/auth/me' && method === 'GET') {
+        return handleGetMe(env, request);
+      }
+
       // GET /v1/agents/:id
       const agentMatch = path.match(/^\/v1\/agents\/([^/]+)$/);
       if (agentMatch && method === 'GET') {
-        return handleGetAgent(env, agentMatch[1]);
+        return handleGetAgent(env, agentMatch[1], request);
       }
 
       // GET /v1/traces (with query params)
       if (path === '/v1/traces' && method === 'GET') {
-        return handleGetTraces(env, url);
+        return handleGetTraces(env, url, request);
       }
 
       // GET /v1/traces/:id
