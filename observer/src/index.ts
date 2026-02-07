@@ -49,12 +49,6 @@ interface GatewayLog {
   metadata?: Record<string, string>;
 }
 
-interface GatewayLogDetail {
-  id: string;
-  response_body?: string;
-  request_body?: string;
-}
-
 interface GatewayMetadata {
   agent_id: string;
   agent_hash: string;
@@ -317,35 +311,41 @@ async function fetchLogs(env: Env, limit: number = 50): Promise<GatewayLog[]> {
 }
 
 /**
- * Fetch full request and response bodies for a specific log entry
+ * Fetch full request and response bodies for a specific log entry.
+ * CF AI Gateway stores bodies at separate endpoints:
+ *   GET /logs/{id}/request  → request body
+ *   GET /logs/{id}/response → response body
  */
 async function fetchLogBodies(
   logId: string,
   env: Env
 ): Promise<{ request: string; response: string }> {
-  const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai-gateway/gateways/${env.GATEWAY_ID}/logs/${logId}`;
+  const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai-gateway/gateways/${env.GATEWAY_ID}/logs/${logId}`;
+  const headers = {
+    Authorization: `Bearer ${env.CF_API_TOKEN}`,
+  };
 
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${env.CF_API_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-  });
+  const [reqRes, resRes] = await Promise.all([
+    fetch(`${baseUrl}/request`, { headers }).catch(() => null),
+    fetch(`${baseUrl}/response`, { headers }).catch(() => null),
+  ]);
 
-  if (!response.ok) {
-    console.warn(`[observer] Failed to fetch log bodies for ${logId}`);
-    return { request: '', response: '' };
+  let requestBody = '';
+  let responseBody = '';
+
+  if (reqRes && reqRes.ok) {
+    requestBody = await reqRes.text();
+  } else {
+    console.warn(`[observer] Failed to fetch request body for ${logId}: ${reqRes?.status}`);
   }
 
-  const data = (await response.json()) as {
-    success: boolean;
-    result: GatewayLogDetail;
-  };
+  if (resRes && resRes.ok) {
+    responseBody = await resRes.text();
+  } else {
+    console.warn(`[observer] Failed to fetch response body for ${logId}: ${resRes?.status}`);
+  }
 
-  return {
-    request: data.result?.request_body || '',
-    response: data.result?.response_body || '',
-  };
+  return { request: requestBody, response: responseBody };
 }
 
 /**
