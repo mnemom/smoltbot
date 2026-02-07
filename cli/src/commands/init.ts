@@ -3,6 +3,7 @@ import {
   loadConfig,
   saveConfig,
   generateAgentId,
+  deriveAgentId,
   type Config,
 } from "../lib/config.js";
 import {
@@ -101,7 +102,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
       if (!reconfigure) {
         console.log("\nKeeping existing configuration.\n");
         // Still create/update smoltbot config
-        const agentId = await createSmoltbotConfig(existingConfig);
+        const agentId = await createSmoltbotConfig(existingConfig, detection.apiKey);
         showSuccessMessage(agentId, modelId);
         return;
       }
@@ -137,7 +138,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   }
 
   // Step 8: Create smoltbot config
-  const agentId = await createSmoltbotConfig(existingConfig);
+  const agentId = await createSmoltbotConfig(existingConfig, detection.apiKey);
 
   // Step 9: Show success
   // Traced mode is active if we just switched OR if already using smoltbot
@@ -263,9 +264,12 @@ async function promptModelSwitch(
  * Create or update smoltbot config
  */
 async function createSmoltbotConfig(
-  existingConfig: Config | null
+  existingConfig: Config | null,
+  apiKey?: string
 ): Promise<string> {
-  const agentId = existingConfig?.agentId || generateAgentId();
+  const agentId = apiKey
+    ? deriveAgentId(apiKey)
+    : existingConfig?.agentId || generateAgentId();
 
   const config: Config = {
     agentId,
