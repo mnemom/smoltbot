@@ -368,6 +368,11 @@ async function handleGetAgent(env: Env, agentId: string, request: Request): Prom
     }
   }
 
+  // Compute status from last_seen (active if seen within 1 hour)
+  const lastSeen = agent.last_seen ? new Date(agent.last_seen as string).getTime() : 0;
+  const oneHourAgo = Date.now() - (60 * 60 * 1000);
+  agent.status = lastSeen > oneHourAgo ? 'active' : 'offline';
+
   return jsonResponse(data);
 }
 
