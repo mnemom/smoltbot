@@ -1,5 +1,7 @@
 # smoltbot
 
+[![CI](https://github.com/mnemom/smoltbot/actions/workflows/ci.yml/badge.svg)](https://github.com/mnemom/smoltbot/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/mnemom/smoltbot/actions/workflows/codeql.yml/badge.svg)](https://github.com/mnemom/smoltbot/actions/workflows/codeql.yml)
 [![npm](https://img.shields.io/npm/v/smoltbot.svg)](https://www.npmjs.com/package/smoltbot)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![AAP](https://img.shields.io/badge/AAP-compliant-green.svg)](https://github.com/mnemom/aap)
