@@ -1,6 +1,6 @@
 {
   "name": "smoltbot",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Transparent AI agent tracing - AAP compliant",
   "type": "module",
   "bin": {
@@ -20,8 +20,16 @@
     "typescript": "^5.3.3",
     "vitest": "^1.2.0"
   },
-  "files": ["dist"],
-  "keywords": ["ai", "agent", "transparency", "aap", "alignment"],
-  "author": "Mnemon",
-  "license": "MIT"
+  "files": ["dist", "!dist/__tests__", "README.md", "LICENSE"],
+  "keywords": ["ai", "agent", "transparency", "aap", "alignment", "tracing", "observability"],
+  "author": "Mnemom LLC",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mnemom/smoltbot"
+  },
+  "homepage": "https://mnemom.ai",
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
