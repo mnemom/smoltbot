@@ -1,5 +1,9 @@
 # smoltbot
 
+[![npm](https://img.shields.io/npm/v/smoltbot.svg)](https://www.npmjs.com/package/smoltbot)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![AAP](https://img.shields.io/badge/AAP-compliant-green.svg)](https://github.com/mnemom/aap)
+
 Transparent AI agent tracing. [AAP](https://github.com/mnemom/aap)-compliant.
 
 Smoltbot observes your AI agent's API calls and builds verifiable alignment traces — what decisions were made, what alternatives were considered, and whether behavior matches declared values. Your prompts and responses are never stored.
