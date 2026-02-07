@@ -334,13 +334,34 @@ async function fetchLogBodies(
   let responseBody = '';
 
   if (reqRes && reqRes.ok) {
-    requestBody = await reqRes.text();
+    const raw = await reqRes.text();
+    // CF API may return raw body or wrap in {success, result} envelope
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed.result !== undefined) {
+        requestBody = typeof parsed.result === 'string' ? parsed.result : JSON.stringify(parsed.result);
+      } else {
+        requestBody = raw;
+      }
+    } catch {
+      requestBody = raw;
+    }
   } else {
     console.warn(`[observer] Failed to fetch request body for ${logId}: ${reqRes?.status}`);
   }
 
   if (resRes && resRes.ok) {
-    responseBody = await resRes.text();
+    const raw = await resRes.text();
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed.result !== undefined) {
+        responseBody = typeof parsed.result === 'string' ? parsed.result : JSON.stringify(parsed.result);
+      } else {
+        responseBody = raw;
+      }
+    } catch {
+      responseBody = raw;
+    }
   } else {
     console.warn(`[observer] Failed to fetch response body for ${logId}: ${resRes?.status}`);
   }
