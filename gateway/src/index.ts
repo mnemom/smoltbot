@@ -112,17 +112,18 @@ export async function getOrCreateAgent(
   const newAgents: Agent[] = await createResponse.json();
   const newAgent = newAgents[0];
 
-  // Create default alignment card for new agent
-  await createDefaultAlignmentCard(newAgent.id, env);
+  // Create alignment card for new agent
+  await ensureAlignmentCard(newAgent.id, env);
 
   return { agent: newAgent, isNew: true };
 }
 
 /**
- * Create a default alignment card for a new agent.
+ * Ensure an alignment card exists for an agent (upsert).
+ * Creates a new card or updates an existing one with current defaults.
  * Structure matches AAP SDK AlignmentCard type.
  */
-export async function createDefaultAlignmentCard(
+export async function ensureAlignmentCard(
   agentId: string,
   env: Env
 ): Promise<void> {
@@ -130,12 +131,15 @@ export async function createDefaultAlignmentCard(
     'apikey': env.SUPABASE_KEY,
     'Authorization': `Bearer ${env.SUPABASE_KEY}`,
     'Content-Type': 'application/json',
+    'Prefer': 'resolution=merge-duplicates,return=minimal',
   };
 
   const cardId = `ac-${agentId.replace('smolt-', '')}`;
   const issuedAt = new Date().toISOString();
 
   // Default alignment card per AAP spec
+  // bounded_actions: models the agent is permitted to use via the gateway
+  // declared values: the full set the observer's Haiku analysis can assign
   const cardJson = {
     aap_version: '0.1.0',
     card_id: cardId,
@@ -146,10 +150,20 @@ export async function createDefaultAlignmentCard(
       relationship: 'delegated_authority',
     },
     values: {
-      declared: ['transparency', 'accuracy'],
+      declared: ['transparency', 'accuracy', 'helpfulness', 'safety', 'autonomy', 'honesty'],
     },
     autonomy_envelope: {
-      bounded_actions: [],
+      bounded_actions: [
+        'claude-opus-4-6-20260205',
+        'claude-opus-4-5-20251101',
+        'claude-sonnet-4-5-20250929',
+        'claude-haiku-4-5-20251001',
+        'claude-3-5-haiku-20241022',
+        'claude-3-5-sonnet-20241022',
+        'claude-3-opus-20240229',
+        'claude-3-sonnet-20240229',
+        'claude-3-haiku-20240307',
+      ],
       escalation_triggers: [],
       forbidden_actions: [],
     },
@@ -167,18 +181,21 @@ export async function createDefaultAlignmentCard(
     is_active: true,
   };
 
-  const response = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/alignment_cards`,
-    {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(dbRecord),
-    }
-  );
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/alignment_cards?on_conflict=id`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(dbRecord),
+      }
+    );
 
-  if (!response.ok) {
-    // Log but don't fail - agent creation is more important
-    console.error(`Failed to create alignment card: ${response.status}`);
+    if (!response.ok) {
+      console.error(`Failed to upsert alignment card: ${response.status}`);
+    }
+  } catch {
+    // Background task — don't let failures propagate
   }
 }
 
@@ -307,8 +324,9 @@ export async function handleAnthropicProxy(
     responseHeaders.set('x-smoltbot-agent', agent.id);
     responseHeaders.set('x-smoltbot-session', sessionId);
 
-    // Update last_seen in background
+    // Update last_seen and ensure alignment card is current (background)
     ctx.waitUntil(updateLastSeen(agent.id, env));
+    ctx.waitUntil(ensureAlignmentCard(agent.id, env));
 
     return new Response(response.body, {
       status: response.status,
