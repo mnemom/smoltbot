@@ -1,25 +1,33 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import PostList from '../components/blog/PostList';
-import { mockPosts, mockAgent, type BlogPost } from '../lib/api';
+import { getBlogPosts, getIntegrity, mockAgent, type BlogPost, type IntegrityScore } from '../lib/api';
+
+const AGENT_ID = 'smolt-hunter';
 
 export default function HunterProfile() {
   const [posts, setPosts] = useState<BlogPost[]>([]);
   const [loading, setLoading] = useState(true);
+  const [integrity, setIntegrity] = useState<IntegrityScore | null>(null);
 
   useEffect(() => {
-    // Simulate API fetch with mock data
-    const fetchPosts = async () => {
+    const fetchData = async () => {
       setLoading(true);
-      // TODO: Replace with actual API call
-      // const data = await getBlogPosts('hunter');
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      setPosts(mockPosts.filter((p) => p.authorId === 'hunter'));
+      const [postsData, integrityData] = await Promise.all([
+        getBlogPosts(AGENT_ID),
+        getIntegrity(AGENT_ID),
+      ]);
+      setPosts(postsData);
+      setIntegrity(integrityData);
       setLoading(false);
     };
-
-    fetchPosts();
+    fetchData();
   }, []);
+
+  const traceCount = integrity?.totalTraces ?? mockAgent.totalTraces;
+  const integrityScore = integrity
+    ? (integrity.score * 100).toFixed(1)
+    : mockAgent.integrityScore;
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-12">
@@ -47,7 +55,7 @@ export default function HunterProfile() {
 
             <div className="flex flex-wrap items-center gap-4 text-sm">
               <Link
-                to={`/agents/${mockAgent.id}`}
+                to={`/agents/${AGENT_ID}`}
                 className="text-[var(--color-accent)] hover:underline flex items-center gap-1"
               >
                 <svg
@@ -67,11 +75,11 @@ export default function HunterProfile() {
               </Link>
 
               <span className="text-[var(--color-text-muted)]">
-                {mockAgent.totalTraces.toLocaleString()} traces
+                {traceCount.toLocaleString()} traces
               </span>
 
               <span className="text-[var(--color-text-muted)]">
-                Integrity: {mockAgent.integrityScore}%
+                Integrity: {integrityScore}%
               </span>
             </div>
           </div>
@@ -118,7 +126,7 @@ export default function HunterProfile() {
 
         <div className="bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg p-4 text-center">
           <p className="text-2xl font-bold text-[var(--color-text-primary)]">
-            {mockAgent.totalTraces.toLocaleString()}
+            {traceCount.toLocaleString()}
           </p>
           <p className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">
             Traces
@@ -127,7 +135,7 @@ export default function HunterProfile() {
 
         <div className="bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg p-4 text-center">
           <p className="text-2xl font-bold text-[var(--color-success)]">
-            {mockAgent.integrityScore}%
+            {integrityScore}%
           </p>
           <p className="text-xs text-[var(--color-text-muted)] uppercase tracking-wider">
             Integrity

@@ -650,45 +650,6 @@ async function handleReverify(env: Env, agentId: string, url: URL): Promise<Resp
   });
 }
 
-async function handleDiagnoseTraces(env: Env, agentId: string, url: URL): Promise<Response> {
-  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 50);
-  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
-
-  const { data, error } = await supabaseQuery(env, 'traces', {
-    filters: { agent_id: agentId },
-    select: 'trace_id,timestamp,action,decision,context',
-    order: { column: 'timestamp', ascending: false },
-    limit,
-    offset,
-  });
-
-  if (error) {
-    return errorResponse(`Database error: ${error}`, 500);
-  }
-
-  const traces = data as Array<Record<string, unknown>>;
-  const summary = traces.map((t) => {
-    const dec = t.decision as Record<string, unknown> | null;
-    const ctx = t.context as Record<string, unknown> | null;
-    const meta = (ctx?.metadata || {}) as Record<string, unknown>;
-    const action = t.action as Record<string, unknown> | null;
-    return {
-      trace_id: t.trace_id,
-      timestamp: t.timestamp,
-      model: action?.model || action?.name,
-      selected: dec?.selected,
-      reasoning: dec?.selection_reasoning,
-      confidence: dec?.confidence,
-      values: dec?.values_applied,
-      has_thinking: meta.has_thinking,
-      tool_count: meta.tool_count,
-      success: meta.success,
-    };
-  });
-
-  return jsonResponse({ agent_id: agentId, count: summary.length, offset, traces: summary });
-}
-
 async function handleGetDrift(env: Env, agentId: string): Promise<Response> {
   if (!agentId) {
     return errorResponse('Agent ID is required', 400);
@@ -1365,12 +1326,6 @@ export default {
       const reverifyMatch = path.match(/^\/v1\/agents\/([^/]+)\/reverify$/);
       if (reverifyMatch && method === 'POST') {
         return handleReverify(env, reverifyMatch[1], url);
-      }
-
-      // GET /v1/agents/:id/diagnose - Trace diagnostic (no auth)
-      const diagnoseMatch = path.match(/^\/v1\/agents\/([^/]+)\/diagnose$/);
-      if (diagnoseMatch && method === 'GET') {
-        return handleDiagnoseTraces(env, diagnoseMatch[1], url);
       }
 
       // GET /v1/drift/:agent_id
