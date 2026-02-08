@@ -326,8 +326,8 @@ async function fetchLogBodies(
   };
 
   const [reqRes, resRes] = await Promise.all([
-    fetch(`${baseUrl}/request`, { headers }).catch(() => null),
-    fetch(`${baseUrl}/response`, { headers }).catch(() => null),
+    fetch(`${baseUrl}/request`, { headers }).catch((e) => { console.warn(`[observer] fetch /request threw for ${logId}: ${e}`); return null; }),
+    fetch(`${baseUrl}/response`, { headers }).catch((e) => { console.warn(`[observer] fetch /response threw for ${logId}: ${e}`); return null; }),
   ]);
 
   let requestBody = '';
@@ -335,6 +335,7 @@ async function fetchLogBodies(
 
   if (reqRes && reqRes.ok) {
     const raw = await reqRes.text();
+    console.log(`[observer] Request body for ${logId}: status=${reqRes.status}, len=${raw.length}, preview=${raw.substring(0, 200)}`);
     // CF API may return raw body or wrap in {success, result} envelope
     try {
       const parsed = JSON.parse(raw);
@@ -347,11 +348,15 @@ async function fetchLogBodies(
       requestBody = raw;
     }
   } else {
-    console.warn(`[observer] Failed to fetch request body for ${logId}: ${reqRes?.status}`);
+    const statusText = reqRes ? `${reqRes.status} ${reqRes.statusText}` : 'null (fetch failed)';
+    let errorBody = '';
+    if (reqRes) { try { errorBody = await reqRes.text(); } catch {} }
+    console.warn(`[observer] Failed to fetch request body for ${logId}: ${statusText} body=${errorBody.substring(0, 300)}`);
   }
 
   if (resRes && resRes.ok) {
     const raw = await resRes.text();
+    console.log(`[observer] Response body for ${logId}: status=${resRes.status}, len=${raw.length}, preview=${raw.substring(0, 200)}`);
     try {
       const parsed = JSON.parse(raw);
       if (parsed.result !== undefined) {
@@ -363,9 +368,13 @@ async function fetchLogBodies(
       responseBody = raw;
     }
   } else {
-    console.warn(`[observer] Failed to fetch response body for ${logId}: ${resRes?.status}`);
+    const statusText = resRes ? `${resRes.status} ${resRes.statusText}` : 'null (fetch failed)';
+    let errorBody = '';
+    if (resRes) { try { errorBody = await resRes.text(); } catch {} }
+    console.warn(`[observer] Failed to fetch response body for ${logId}: ${statusText} body=${errorBody.substring(0, 300)}`);
   }
 
+  console.log(`[observer] Body fetch result for ${logId}: reqLen=${requestBody.length}, resLen=${responseBody.length}`);
   return { request: requestBody, response: responseBody };
 }
 
@@ -439,8 +448,31 @@ function tryParseResponseJSON(
   try {
     const response = JSON.parse(body);
     const content = response.content;
-    if (!Array.isArray(content)) return null;
-    return extractFromContentBlocks(content);
+
+    // Standard Anthropic format: content is an array of content blocks
+    if (Array.isArray(content)) {
+      return extractFromContentBlocks(content);
+    }
+
+    // CF AI Gateway format: content is a flattened string
+    if (typeof content === 'string' && content.length > 0) {
+      return {
+        thinking: null,
+        toolCalls: [],
+        responseText: content.substring(0, 3000),
+      };
+    }
+
+    // Error responses have error.message instead of content
+    if (response.type === 'error' && response.error?.message) {
+      return {
+        thinking: null,
+        toolCalls: [],
+        responseText: `Error: ${response.error.message}`,
+      };
+    }
+
+    return null;
   } catch {
     return null;
   }
@@ -559,22 +591,26 @@ function extractUserQuery(requestBody: string): string | null {
     const messages = request.messages;
     if (!Array.isArray(messages)) return null;
 
-    // Get the last user message
-    const lastUserMsg = [...messages].reverse().find(
-      (m: Record<string, unknown>) => m.role === 'user'
-    );
-    if (!lastUserMsg) return null;
+    // Walk backwards to find the last user message with actual text content
+    // (skip tool_result-only messages common in multi-turn tool use)
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i] as Record<string, unknown>;
+      if (msg.role !== 'user') continue;
 
-    const content = lastUserMsg.content;
-    if (typeof content === 'string') {
-      return content.substring(0, 500);
-    }
-    if (Array.isArray(content)) {
-      return content
-        .filter((c: Record<string, unknown>) => c.type === 'text')
-        .map((c: Record<string, unknown>) => c.text as string)
-        .join('\n')
-        .substring(0, 500);
+      const content = msg.content;
+      if (typeof content === 'string' && content.length > 0) {
+        return content.substring(0, 500);
+      }
+      if (Array.isArray(content)) {
+        const text = content
+          .filter((c: Record<string, unknown>) => c.type === 'text')
+          .map((c: Record<string, unknown>) => c.text as string)
+          .join('\n');
+        if (text.length > 0) {
+          return text.substring(0, 500);
+        }
+        // This user message had no text (e.g., tool_result only) — keep looking
+      }
     }
     return null;
   } catch {

@@ -21,7 +21,7 @@
  * - GET /v1/auth/me - Get authenticated user info and linked agents
  */
 
-import { detectDrift, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
+import { detectDrift, verifyTrace, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
 
 export interface Env {
   SUPABASE_URL: string;
@@ -33,7 +33,7 @@ export interface Env {
 // CORS headers for all responses
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
@@ -398,6 +398,42 @@ async function handleGetAgentCard(env: Env, agentId: string): Promise<Response> 
   return jsonResponse(data);
 }
 
+async function handleUpdateAgentCard(env: Env, agentId: string, request: Request): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  const body = await request.json() as { card_json: AlignmentCard };
+  if (!body.card_json) {
+    return errorResponse('card_json is required in request body', 400);
+  }
+
+  const headers = {
+    'apikey': env.SUPABASE_KEY,
+    'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+  };
+
+  const cardId = `ac-${agentId.replace('smolt-', '')}`;
+  const response = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/alignment_cards?id=eq.${cardId}`,
+    {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({
+        card_json: body.card_json,
+        issued_at: new Date().toISOString(),
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    return errorResponse(`Failed to update card: ${response.status}`, 500);
+  }
+
+  return jsonResponse({ updated: true, card_id: cardId });
+}
+
 async function handleGetTraces(env: Env, url: URL, request: Request): Promise<Response> {
   const agentId = url.searchParams.get('agent_id');
   const limit = parseInt(url.searchParams.get('limit') || '50', 10);
@@ -522,6 +558,135 @@ async function handleGetIntegrity(env: Env, agentId: string): Promise<Response> 
     violations,
     score: Math.round(score * 100) / 100,
   });
+}
+
+async function handleReverify(env: Env, agentId: string, url: URL): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  // CF Workers have a 50 subrequest limit — use limit/offset for pagination
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '40', 10), 40);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+  // Fetch active alignment card
+  const { data: cardData, error: cardError } = await supabaseQuery(env, 'alignment_cards', {
+    filters: { agent_id: agentId, is_active: true },
+    single: true,
+  });
+
+  if (cardError) {
+    if (cardError.includes('PGRST116') || cardError.includes('0 rows')) {
+      return errorResponse('Alignment card not found for agent', 404);
+    }
+    return errorResponse(`Database error: ${cardError}`, 500);
+  }
+
+  const card = (cardData as { card_json: AlignmentCard }).card_json;
+
+  // Fetch traces for this agent (paginated)
+  const { data: tracesData, error: tracesError } = await supabaseQuery(env, 'traces', {
+    filters: { agent_id: agentId },
+    select: 'trace_id,trace_json,verification',
+    order: { column: 'timestamp', ascending: true },
+    limit,
+    offset,
+  });
+
+  if (tracesError) {
+    return errorResponse(`Database error: ${tracesError}`, 500);
+  }
+
+  const traces = tracesData as Array<{
+    trace_id: string;
+    trace_json: APTrace;
+    verification: unknown;
+  }>;
+
+  // Re-verify each trace against the updated card
+  let updated = 0;
+  let stillViolating = 0;
+  const errors: string[] = [];
+
+  const headers = {
+    'apikey': env.SUPABASE_KEY,
+    'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+  };
+
+  // Process sequentially to stay within subrequest limits
+  for (const trace of traces) {
+    try {
+      const newVerification = verifyTrace(trace.trace_json, card);
+      const patchRes = await fetch(
+        `${env.SUPABASE_URL}/rest/v1/traces?trace_id=eq.${trace.trace_id}`,
+        {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ verification: newVerification }),
+        }
+      );
+      if (!patchRes.ok) {
+        errors.push(`PATCH failed for ${trace.trace_id}: ${patchRes.status}`);
+      } else {
+        updated++;
+        if (newVerification.violations.length > 0) stillViolating++;
+      }
+    } catch (err) {
+      errors.push(`${trace.trace_id}: ${err}`);
+    }
+  }
+
+  return jsonResponse({
+    agent_id: agentId,
+    card_id: card.card_id,
+    total_traces_in_batch: traces.length,
+    offset,
+    limit,
+    reverified: updated,
+    still_violating: stillViolating,
+    now_clean: updated - stillViolating,
+    errors: errors.length > 0 ? errors : undefined,
+  });
+}
+
+async function handleDiagnoseTraces(env: Env, agentId: string, url: URL): Promise<Response> {
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 50);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+  const { data, error } = await supabaseQuery(env, 'traces', {
+    filters: { agent_id: agentId },
+    select: 'trace_id,timestamp,action,decision,context',
+    order: { column: 'timestamp', ascending: false },
+    limit,
+    offset,
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const traces = data as Array<Record<string, unknown>>;
+  const summary = traces.map((t) => {
+    const dec = t.decision as Record<string, unknown> | null;
+    const ctx = t.context as Record<string, unknown> | null;
+    const meta = (ctx?.metadata || {}) as Record<string, unknown>;
+    const action = t.action as Record<string, unknown> | null;
+    return {
+      trace_id: t.trace_id,
+      timestamp: t.timestamp,
+      model: action?.model || action?.name,
+      selected: dec?.selected,
+      reasoning: dec?.selection_reasoning,
+      confidence: dec?.confidence,
+      values: dec?.values_applied,
+      has_thinking: meta.has_thinking,
+      tool_count: meta.tool_count,
+      success: meta.success,
+    };
+  });
+
+  return jsonResponse({ agent_id: agentId, count: summary.length, offset, traces: summary });
 }
 
 async function handleGetDrift(env: Env, agentId: string): Promise<Response> {
@@ -1151,6 +1316,11 @@ export default {
         return handleGetAgentCard(env, agentCardMatch[1]);
       }
 
+      // PATCH /v1/agents/:id/card - Update alignment card
+      if (agentCardMatch && method === 'PATCH') {
+        return handleUpdateAgentCard(env, agentCardMatch[1], request);
+      }
+
       // POST /v1/agents/:id/claim
       const agentClaimMatch = path.match(/^\/v1\/agents\/([^/]+)\/claim$/);
       if (agentClaimMatch && method === 'POST') {
@@ -1189,6 +1359,18 @@ export default {
       const integrityMatch = path.match(/^\/v1\/integrity\/([^/]+)$/);
       if (integrityMatch && method === 'GET') {
         return handleGetIntegrity(env, integrityMatch[1]);
+      }
+
+      // POST /v1/agents/:id/reverify - Re-verify traces against updated card
+      const reverifyMatch = path.match(/^\/v1\/agents\/([^/]+)\/reverify$/);
+      if (reverifyMatch && method === 'POST') {
+        return handleReverify(env, reverifyMatch[1], url);
+      }
+
+      // GET /v1/agents/:id/diagnose - Trace diagnostic (no auth)
+      const diagnoseMatch = path.match(/^\/v1\/agents\/([^/]+)\/diagnose$/);
+      if (diagnoseMatch && method === 'GET') {
+        return handleDiagnoseTraces(env, diagnoseMatch[1], url);
       }
 
       // GET /v1/drift/:agent_id
