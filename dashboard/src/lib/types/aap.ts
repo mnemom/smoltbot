@@ -134,6 +134,20 @@ export interface TraceContext {
  * The core trace structure for transparent agent behavior logging.
  * Includes action details, decision reasoning, and optional Braid metadata.
  */
+export interface TraceViolation {
+  type: string;
+  severity: 'low' | 'medium' | 'high';
+  description: string;
+  trace_field?: string;
+}
+
+export interface TraceVerification {
+  verified: boolean;
+  violations: TraceViolation[];
+  card_id?: string;
+  timestamp?: string;
+}
+
 export interface APTrace {
   trace_id: string;
   agent_id: string;
@@ -144,6 +158,7 @@ export interface APTrace {
   decision: TraceDecision;
   escalation?: TraceEscalation;
   context?: TraceContext;
+  verification?: TraceVerification;
 }
 
 /**

@@ -157,6 +157,31 @@ export async function getIntegrity(agentId: string): Promise<IntegrityScore> {
   }
 }
 
+export interface DriftAlert {
+  card_id: string;
+  trace_ids: string[];
+  analysis: {
+    similarity_score: number;
+    drift_direction: string;
+  };
+  recommendation: string;
+}
+
+export interface DriftResult {
+  agent_id: string;
+  analyzed_traces: number;
+  drift: DriftAlert[];
+}
+
+export async function getDrift(agentId: string): Promise<DriftResult | null> {
+  try {
+    return await fetchApi<DriftResult>(`/v1/drift/${agentId}`);
+  } catch {
+    console.warn('API unavailable for drift');
+    return null;
+  }
+}
+
 export async function claimAgent(uuid: string, hashProof: string): Promise<ClaimResult> {
   return fetchApi<ClaimResult>(`/v1/agents/${uuid}/claim`, {
     method: 'POST',
