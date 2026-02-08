@@ -356,7 +356,8 @@ async function handleGetAgent(env: Env, agentId: string, request: Request): Prom
   const agent = data as Record<string, unknown>;
 
   // If agent is claimed and has an owner, check if requester is the owner
-  if (agent.user_id) {
+  // Public agents are visible to everyone (opt-in transparency)
+  if (agent.user_id && !agent.public) {
     const user = await getAuthUser(request, env);
     if (!user || user.sub !== agent.user_id) {
       return jsonResponse({
@@ -448,15 +449,16 @@ async function handleGetTraces(env: Env, url: URL, request: Request): Promise<Re
   }
 
   // If filtering by agent_id, check ownership for claimed agents
+  // Public agents skip ownership checks (opt-in transparency)
   if (agentId) {
     const { data: agentData } = await supabaseQuery(env, 'agents', {
       eq: ['id', agentId],
-      select: 'id,user_id',
+      select: 'id,user_id,public',
       single: true,
     });
     if (agentData) {
-      const agent = agentData as { user_id?: string };
-      if (agent.user_id) {
+      const agent = agentData as { user_id?: string; public?: boolean };
+      if (agent.user_id && !agent.public) {
         const user = await getAuthUser(request, env);
         if (!user || user.sub !== agent.user_id) {
           return jsonResponse({ traces: [], limit, offset, private: true });
