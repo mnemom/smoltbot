@@ -472,6 +472,32 @@ export function TraceCard({
         </div>
       )}
 
+      {/* Verification / Violations */}
+      {trace.verification && !trace.verification.verified && (
+        <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg">
+          <h4 className="text-sm font-medium text-red-400 mb-2">
+            Alignment Violation{trace.verification.violations.length > 1 ? 's' : ''}
+          </h4>
+          <div className="space-y-2">
+            {trace.verification.violations.map((v, i) => (
+              <div key={i} className="flex items-start gap-2">
+                <span className={`px-1.5 py-0.5 text-xs rounded shrink-0 ${
+                  v.severity === 'high' ? 'bg-red-500/20 text-red-400'
+                    : v.severity === 'medium' ? 'bg-amber-500/20 text-amber-400'
+                    : 'bg-yellow-500/20 text-yellow-400'
+                }`}>
+                  {v.severity}
+                </span>
+                <div>
+                  <span className="text-xs font-mono text-[var(--color-text-muted)]">{v.type}</span>
+                  <p className="text-sm text-[var(--color-text-secondary)]">{v.description}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Action Target & Parameters */}
       {(trace.action.target || trace.action.parameters) && (
         <div className="pt-4 border-t border-[var(--color-border)]">

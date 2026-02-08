@@ -238,6 +238,8 @@ export function TraceFeed({
               className={`w-full text-left bg-[var(--color-bg-card)] border rounded-lg p-4 transition-all hover:border-[var(--color-accent)] ${
                 isExpanded
                   ? 'border-[var(--color-accent)] rounded-b-none'
+                  : trace.verification?.verified === false
+                  ? 'border-red-500/50 bg-red-500/5'
                   : 'border-[var(--color-border)]'
               }`}
             >
@@ -259,6 +261,13 @@ export function TraceFeed({
                 >
                   {trace.action.type}
                 </span>
+
+                {/* Violation badge */}
+                {trace.verification?.verified === false && (
+                  <span className="px-2 py-0.5 text-xs font-medium rounded bg-red-500/20 text-red-400 border border-red-500/30">
+                    violation
+                  </span>
+                )}
 
                 {/* Content */}
                 <div className="flex-1 min-w-0">

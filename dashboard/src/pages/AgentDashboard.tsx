@@ -2,8 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import AgentHeader from '../components/agents/AgentHeader';
 import { TraceFeed, TraceTimeline, TraceMatrix } from '../components/traces';
-import { BraidDivergenceAlert, BraidRuptures } from '../components/braid';
-import { getAgent, getAgentTraces, getAgentSSM, type Agent, type IntegrityScore } from '../lib/api';
+import { getAgent, getAgentTraces, getIntegrity, getDrift, type Agent, type IntegrityScore, type DriftResult } from '../lib/api';
 import type { APTrace } from '../lib/types/aap';
 
 type ViewMode = 'feed' | 'timeline' | 'matrix';
@@ -13,6 +12,7 @@ export default function AgentDashboard() {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [traces, setTraces] = useState<APTrace[]>([]);
   const [integrity, setIntegrity] = useState<IntegrityScore | null>(null);
+  const [drift, setDrift] = useState<DriftResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('feed');
@@ -25,23 +25,16 @@ export default function AgentDashboard() {
 
       try {
         if (uuid) {
-          const agentData = await getAgent(uuid);
+          const [agentData, traceData, integrityData, driftData] = await Promise.all([
+            getAgent(uuid),
+            getAgentTraces(uuid, 100),
+            getIntegrity(uuid),
+            getDrift(uuid),
+          ]);
           setAgent(agentData);
-
-          // Fetch traces
-          const traceData = await getAgentTraces(uuid, 100);
           setTraces(traceData);
-
-          // Fetch SSM/integrity data
-          const ssmData = await getAgentSSM(uuid);
-          if (ssmData) {
-            setIntegrity({
-              score: ssmData.mean_similarity || 0.95,
-              totalTraces: traceData.length,
-              verifiedTraces: traceData.length,
-              violations: 0,
-            });
-          }
+          setIntegrity(integrityData);
+          setDrift(driftData);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load agent');
@@ -54,58 +47,6 @@ export default function AgentDashboard() {
       fetchAgent();
     }
   }, [uuid]);
-
-  // Detect divergence in traces
-  const detectDivergence = () => {
-    if (traces.length < 3) return null;
-
-    // Check for sustained low similarity
-    const recentTraces = traces.slice(0, 5);
-    let lowSimilarityCount = 0;
-
-    for (let i = 1; i < recentTraces.length; i++) {
-      const t1 = recentTraces[i - 1];
-      const t2 = recentTraces[i];
-      const v1 = t1.decision?.values_applied || [];
-      const v2 = t2.decision?.values_applied || [];
-      const shared = v1.filter(v => v2.includes(v)).length;
-      const total = new Set([...v1, ...v2]).size;
-      const similarity = total > 0 ? shared / total : 0.5;
-
-      if (similarity < threshold) {
-        lowSimilarityCount++;
-      }
-    }
-
-    if (lowSimilarityCount >= 2) {
-      return {
-        strands: [
-          { id: '1', participant: agent?.name || 'Agent' },
-          { id: '2', participant: 'Alignment Card' },
-        ],
-        similarity: 0.4,
-        sustained_turns: lowSimilarityCount,
-        message: 'Recent traces show divergence from declared values.',
-      };
-    }
-
-    return null;
-  };
-
-  // Extract ruptures from traces
-  const extractRuptures = () => {
-    return traces
-      .filter(t => t.context?.metadata?.absence === 'rupture')
-      .slice(0, 5)
-      .map(t => ({
-        id: t.trace_id,
-        type: 'deliberate' as const,
-        marked_by: agent?.name || 'Agent',
-        timestamp: t.timestamp,
-        description: t.decision?.selection_reasoning || 'Rupture commemorated',
-        message_id: t.trace_id,
-      }));
-  };
 
   if (loading) {
     return (
@@ -138,21 +79,56 @@ export default function AgentDashboard() {
     );
   }
 
-  const divergence = detectDivergence();
-  const ruptures = extractRuptures();
+  const hasDrift = drift && drift.drift.length > 0;
 
   return (
     <div className="max-w-5xl mx-auto px-4 py-12">
       {/* Agent Header */}
       <AgentHeader agent={agent} />
 
-      {/* Divergence Alert */}
-      {divergence && (
-        <div className="mt-6">
-          <BraidDivergenceAlert
-            divergence={divergence}
-            onDismiss={() => {/* Could track dismissed alerts */}}
-          />
+      {/* Drift Alerts */}
+      {hasDrift && (
+        <div className="mt-6 space-y-3">
+          {drift.drift.map((alert, i) => {
+            const severity = alert.analysis.similarity_score < 0.3 ? 'high'
+              : alert.analysis.similarity_score < 0.5 ? 'medium' : 'low';
+            const borderColor = severity === 'high' ? 'border-red-500/50'
+              : severity === 'medium' ? 'border-amber-500/50' : 'border-yellow-500/50';
+            const bgColor = severity === 'high' ? 'bg-red-500/10'
+              : severity === 'medium' ? 'bg-amber-500/10' : 'bg-yellow-500/10';
+            const textColor = severity === 'high' ? 'text-red-400'
+              : severity === 'medium' ? 'text-amber-400' : 'text-yellow-400';
+
+            return (
+              <div key={i} className={`${bgColor} border ${borderColor} rounded-lg p-4`}>
+                <div className="flex items-start gap-3">
+                  <svg className={`w-5 h-5 ${textColor} mt-0.5 shrink-0`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                  </svg>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-sm font-medium ${textColor}`}>
+                        Behavioral Drift Detected
+                      </span>
+                      <span className={`px-1.5 py-0.5 text-xs rounded ${bgColor} ${textColor} border ${borderColor}`}>
+                        {severity}
+                      </span>
+                      <span className="text-xs text-[var(--color-text-muted)]">
+                        Direction: {alert.analysis.drift_direction}
+                      </span>
+                    </div>
+                    <p className="text-sm text-[var(--color-text-secondary)]">
+                      {alert.recommendation}
+                    </p>
+                    <div className="mt-2 flex items-center gap-4 text-xs text-[var(--color-text-muted)]">
+                      <span>Similarity: {(alert.analysis.similarity_score * 100).toFixed(0)}%</span>
+                      <span>{alert.trace_ids.length} traces involved</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -162,8 +138,12 @@ export default function AgentDashboard() {
           <h2 className="text-lg font-semibold text-[var(--color-text-primary)]">
             Integrity Score
           </h2>
-          <span className="text-2xl font-bold text-[var(--color-success)]">
-            {integrity ? `${Math.round(integrity.score * 100)}%` : '—'}
+          <span className={`text-2xl font-bold ${
+            integrity && integrity.violations > 0
+              ? 'text-amber-400'
+              : 'text-[var(--color-success)]'
+          }`}>
+            {integrity ? `${Math.round(integrity.score * 100)}%` : '\u2014'}
           </span>
         </div>
 
@@ -180,36 +160,31 @@ export default function AgentDashboard() {
             </p>
             <p className="text-xs text-[var(--color-text-muted)]">Verified</p>
           </div>
-          <div className="text-center p-4 bg-[var(--color-bg-elevated)] rounded-lg">
-            <p className="text-lg font-semibold text-[var(--color-text-primary)]">
-              {integrity?.violations || 0}
+          <div className={`text-center p-4 rounded-lg ${
+            integrity && integrity.violations > 0
+              ? 'bg-red-500/10 border border-red-500/30'
+              : 'bg-[var(--color-bg-elevated)]'
+          }`}>
+            <p className={`text-lg font-semibold ${
+              integrity && integrity.violations > 0
+                ? 'text-red-400'
+                : 'text-[var(--color-text-primary)]'
+            }`}>
+              {integrity?.violations ?? 0}
             </p>
             <p className="text-xs text-[var(--color-text-muted)]">Violations</p>
           </div>
         </div>
       </div>
 
-      {/* Ruptures (if any) */}
-      {ruptures.length > 0 && (
-        <div className="mt-8">
-          <BraidRuptures
-            ruptures={ruptures}
-            onNavigate={(messageId) => {
-              // Could scroll to trace or open modal
-              console.log('Navigate to:', messageId);
-            }}
-          />
-        </div>
-      )}
-
       {/* Visualization Section */}
       <div className="bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-lg mt-8 overflow-hidden">
         {/* View Mode Tabs */}
         <div className="flex border-b border-[var(--color-border)]">
           {[
-            { id: 'feed', label: 'Trace Feed', icon: '📋' },
-            { id: 'timeline', label: 'Timeline', icon: '📈' },
-            { id: 'matrix', label: 'Matrix', icon: '🔲' },
+            { id: 'feed', label: 'Trace Feed' },
+            { id: 'timeline', label: 'Timeline' },
+            { id: 'matrix', label: 'Matrix' },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -220,7 +195,6 @@ export default function AgentDashboard() {
                   : 'text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)]/50'
               }`}
             >
-              <span className="mr-2">{tab.icon}</span>
               {tab.label}
             </button>
           ))}
