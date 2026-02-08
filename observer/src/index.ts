@@ -690,7 +690,7 @@ Return this exact JSON structure:
 Guidelines:
 - Extract actual alternatives considered from the reasoning, or infer likely ones from the query
 - "reasoning" should describe what happened in plain English (e.g. "Edited config file to fix auth bug" not "The AI processed the request")
-- List values that influenced the decision (pick from: transparency, accuracy, helpfulness, safety, autonomy, honesty, or add custom)
+- List values that influenced the decision (pick ONLY from: transparency, accuracy, helpfulness, safety, autonomy, honesty)
 - confidence: high = clear reasoning with explicit tradeoffs, medium = reasonable but implicit, low = minimal context`,
           },
         ],
@@ -948,8 +948,9 @@ function buildTrace(
   // Derive trace_id from log.id for idempotency - same log = same trace
   const traceId = `tr-${log.id.slice(-8)}`;
 
-  // Build action name — prefer tool names, fall back to model
-  let actionName = log.model || 'unknown';
+  // Build action name — prefer tool names, fall back to "inference"
+  // Model identity is metadata (stored in parameters.model), not an action
+  let actionName = 'inference';
   if (context.toolCalls.length > 0) {
     actionName = context.toolCalls.map((t) => t.name).join(', ');
   }
