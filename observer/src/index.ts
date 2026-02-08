@@ -335,7 +335,6 @@ async function fetchLogBodies(
 
   if (reqRes && reqRes.ok) {
     const raw = await reqRes.text();
-    console.log(`[observer] Request body for ${logId}: status=${reqRes.status}, len=${raw.length}, preview=${raw.substring(0, 200)}`);
     // CF API may return raw body or wrap in {success, result} envelope
     try {
       const parsed = JSON.parse(raw);
@@ -356,7 +355,6 @@ async function fetchLogBodies(
 
   if (resRes && resRes.ok) {
     const raw = await resRes.text();
-    console.log(`[observer] Response body for ${logId}: status=${resRes.status}, len=${raw.length}, preview=${raw.substring(0, 200)}`);
     try {
       const parsed = JSON.parse(raw);
       if (parsed.result !== undefined) {
@@ -374,7 +372,6 @@ async function fetchLogBodies(
     console.warn(`[observer] Failed to fetch response body for ${logId}: ${statusText} body=${errorBody.substring(0, 300)}`);
   }
 
-  console.log(`[observer] Body fetch result for ${logId}: reqLen=${requestBody.length}, resLen=${responseBody.length}`);
   return { request: requestBody, response: responseBody };
 }
 

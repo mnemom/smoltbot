@@ -138,7 +138,14 @@ export async function getAgentSSM(agentId: string): Promise<SSMData | null> {
 
 export async function getIntegrity(agentId: string): Promise<IntegrityScore> {
   try {
-    return await fetchApi<IntegrityScore>(`/v1/integrity/${agentId}`);
+    // API returns snake_case; map to camelCase interface
+    const raw = await fetchApi<Record<string, unknown>>(`/v1/integrity/${agentId}`);
+    return {
+      score: (raw.score as number) ?? 0,
+      totalTraces: (raw.total_traces as number) ?? 0,
+      verifiedTraces: (raw.verified_traces as number) ?? 0,
+      violations: (raw.violations as number) ?? 0,
+    };
   } catch {
     console.warn('API unavailable, using mock data');
     return {
