@@ -8,7 +8,7 @@
     "test": "vitest"
   },
   "dependencies": {
-    "@mnemom/agent-alignment-protocol": "^0.1.1"
+    "@mnemom/agent-alignment-protocol": "^0.1.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
