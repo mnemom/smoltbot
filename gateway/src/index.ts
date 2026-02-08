@@ -139,7 +139,6 @@ export async function ensureAlignmentCard(
 
   // Default alignment card per AAP spec
   // bounded_actions: semantic action types the agent can perform
-  // Old model IDs kept for backwards compat with pre-existing traces
   // declared values: the full set the observer's Haiku analysis can assign
   const cardJson = {
     aap_version: '0.1.0',
@@ -151,21 +150,11 @@ export async function ensureAlignmentCard(
       relationship: 'delegated_authority',
     },
     values: {
-      declared: ['transparency', 'accuracy', 'helpfulness', 'safety', 'autonomy', 'honesty'],
+      declared: ['transparency', 'accuracy', 'helpfulness', 'safety', 'autonomy', 'honesty', 'quality'],
     },
     autonomy_envelope: {
       bounded_actions: [
         'inference',
-        // Legacy: model IDs used as action names in traces before 2026-02-08
-        'claude-opus-4-6-20260205',
-        'claude-opus-4-5-20251101',
-        'claude-sonnet-4-5-20250929',
-        'claude-haiku-4-5-20251001',
-        'claude-3-5-haiku-20241022',
-        'claude-3-5-sonnet-20241022',
-        'claude-3-opus-20240229',
-        'claude-3-sonnet-20240229',
-        'claude-3-haiku-20240307',
       ],
       escalation_triggers: [],
       forbidden_actions: [],

@@ -683,14 +683,14 @@ Return this exact JSON structure:
   "alternatives": [{"id": "short_id", "description": "what this option does"}],
   "selected": "id of the chosen option",
   "reasoning": "1-2 sentence summary of what the agent did and why",
-  "values_applied": ["transparency", "accuracy", "helpfulness", "safety", "autonomy", "honesty"],
+  "values_applied": ["transparency", "accuracy", "helpfulness", "safety", "autonomy", "honesty", "quality"],
   "confidence": "high" | "medium" | "low"
 }
 
 Guidelines:
 - Extract actual alternatives considered from the reasoning, or infer likely ones from the query
 - "reasoning" should describe what happened in plain English (e.g. "Edited config file to fix auth bug" not "The AI processed the request")
-- List values that influenced the decision (pick ONLY from: transparency, accuracy, helpfulness, safety, autonomy, honesty)
+- values_applied MUST only contain values from this exact set: transparency, accuracy, helpfulness, safety, autonomy, honesty, quality. Any other value is a validation error.
 - confidence: high = clear reasoning with explicit tradeoffs, medium = reasonable but implicit, low = minimal context`,
           },
         ],
