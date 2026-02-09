@@ -131,7 +131,7 @@ export async function ensureAlignmentCard(
     'apikey': env.SUPABASE_KEY,
     'Authorization': `Bearer ${env.SUPABASE_KEY}`,
     'Content-Type': 'application/json',
-    'Prefer': 'resolution=merge-duplicates,return=minimal',
+    'Prefer': 'resolution=ignore-duplicates,return=minimal',
   };
 
   const cardId = `ac-${agentId.replace('smolt-', '')}`;
