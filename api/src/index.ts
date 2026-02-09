@@ -7,6 +7,7 @@
  * - GET /v1/agents/:id - Get agent by ID
  * - GET /v1/agents/:id/card - Get active alignment card for agent
  * - POST /v1/agents/:id/claim - Claim agent with hash proof
+ * - GET /v1/agents/:id/traces - Get traces for agent (AAP query_endpoint)
  * - GET /v1/traces - Query traces with filters
  * - GET /v1/traces/:id - Get single trace by ID
  * - GET /v1/integrity/:agent_id - Compute integrity score
@@ -1294,6 +1295,13 @@ export default {
       const agentLinkMatch = path.match(/^\/v1\/agents\/([^/]+)\/link$/);
       if (agentLinkMatch && method === 'POST') {
         return handleLinkAgent(env, agentLinkMatch[1], request);
+      }
+
+      // GET /v1/agents/:id/traces - AAP query_endpoint alias
+      const agentTracesMatch = path.match(/^\/v1\/agents\/([^/]+)\/traces$/);
+      if (agentTracesMatch && method === 'GET') {
+        url.searchParams.set('agent_id', agentTracesMatch[1]);
+        return handleGetTraces(env, url, request);
       }
 
       // GET /v1/auth/me
