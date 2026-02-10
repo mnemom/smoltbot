@@ -294,7 +294,9 @@ async function processLog(
   await submitTrace(trace, verification, log, env);
 
   // Submit AIP checkpoint to Supabase (non-blocking, same pattern as drift)
+  // Override agent_id: SDK uses card_id as proxy, but DB FK references agents(id)
   if (aipSignal) {
+    aipSignal.checkpoint.agent_id = agent_id;
     ctx.waitUntil(submitCheckpoint(aipSignal.checkpoint, env));
   }
 
