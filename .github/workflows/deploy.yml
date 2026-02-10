@@ -1,8 +1,6 @@
 name: Deploy
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -32,6 +30,7 @@ jobs:
     name: Deploy Gateway
     runs-on: ubuntu-latest
     needs: test
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +54,7 @@ jobs:
     name: Deploy Observer
     runs-on: ubuntu-latest
     needs: test
+    environment: production
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +78,7 @@ jobs:
     name: Deploy API
     runs-on: ubuntu-latest
     needs: test
+    environment: production
     steps:
       - uses: actions/checkout@v4
 

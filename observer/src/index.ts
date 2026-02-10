@@ -9,6 +9,12 @@
  * - Uses verifyTrace() to validate traces against alignment cards
  * - Uses detectDrift() to identify behavioral drift patterns
  * - All trace structures conform to APTrace interface
+ *
+ * AIP SDK Integration:
+ * - Uses createClient() + client.check() for real-time integrity analysis
+ * - Runs alongside AAP verification (fail-open, non-blocking checkpoint storage)
+ * - Stores IntegrityCheckpoints in Supabase integrity_checkpoints table
+ * - Enriches AP-Trace metadata with aip_verdict and aip_checkpoint_id
  */
 
 import {
@@ -24,6 +30,15 @@ import {
   type TraceContext,
 } from '@mnemom/agent-alignment-protocol';
 
+import {
+  createClient,
+  DEFAULT_CONSCIENCE_VALUES,
+  type AIPClient,
+  type IntegritySignal,
+  type AIPConfig,
+  type IntegrityCheckpoint,
+} from '@mnemom/agent-integrity-protocol';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -31,10 +46,12 @@ import {
 interface Env {
   CF_ACCOUNT_ID: string;
   CF_API_TOKEN: string;
+  CF_AI_GATEWAY_URL?: string;
   GATEWAY_ID: string;
   SUPABASE_URL: string;
   SUPABASE_KEY: string;
   ANTHROPIC_API_KEY: string;
+  ANALYSIS_API_KEY?: string;
 }
 
 interface GatewayLog {
@@ -257,8 +274,29 @@ async function processLog(
   // Verify trace against alignment card using AAP SDK
   const verification = card ? verifyTrace(trace, card) : null;
 
+  // Run AIP integrity check alongside AAP verification (fail-open)
+  const aipSignal = await runIntegrityCheck(
+    bodies.response,
+    log.provider,
+    agent_id,
+    card,
+    env
+  );
+
+  // Enrich trace metadata with AIP results before submission
+  if (aipSignal && trace.context?.metadata) {
+    const traceMetadata = trace.context.metadata as Record<string, unknown>;
+    traceMetadata.aip_verdict = aipSignal.checkpoint.verdict;
+    traceMetadata.aip_checkpoint_id = aipSignal.checkpoint.checkpoint_id;
+  }
+
   // Submit trace to Supabase (trace + verification stored separately)
   await submitTrace(trace, verification, log, env);
+
+  // Submit AIP checkpoint to Supabase (non-blocking, same pattern as drift)
+  if (aipSignal) {
+    ctx.waitUntil(submitCheckpoint(aipSignal.checkpoint, env));
+  }
 
   // Check for behavioral drift (runs in background)
   ctx.waitUntil(checkForDrift(agent_id, card, env));
@@ -266,7 +304,8 @@ async function processLog(
   // Delete processed log for privacy
   await deleteLog(log.id, env);
 
-  console.log(`[observer] Created trace ${trace.trace_id} for agent ${agent_id}`);
+  console.log(`[observer] Created trace ${trace.trace_id} for agent ${agent_id}` +
+    (aipSignal ? ` (AIP: ${aipSignal.checkpoint.verdict})` : ''));
 
   return true;
 }
@@ -829,6 +868,145 @@ async function submitTrace(
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Failed to submit trace: ${response.status} - ${errorText}`);
+  }
+}
+
+// ============================================================================
+// AIP Integrity Check Functions
+// ============================================================================
+
+/**
+ * Run an AIP integrity check on the response body.
+ * Creates an ephemeral AIP client, runs the check, and destroys the client.
+ * Fail-open: returns null on any error so existing processing is unaffected.
+ */
+async function runIntegrityCheck(
+  responseBody: string,
+  provider: string,
+  agentId: string,
+  card: AlignmentCard | null,
+  env: Env
+): Promise<IntegritySignal | null> {
+  if (!card) {
+    console.log('[observer/aip] Skipping integrity check: no alignment card');
+    return null;
+  }
+
+  let client: AIPClient | null = null;
+
+  try {
+    const analysisApiKey = env.ANALYSIS_API_KEY || env.ANTHROPIC_API_KEY;
+    const analysisBaseUrl = env.CF_AI_GATEWAY_URL || 'https://api.anthropic.com';
+
+    // Map AAP AlignmentCard fields to AIP's minimal card interface
+    const aipCard = {
+      card_id: card.card_id,
+      values: (card.values.declared || []).map((v: string, i: number) => ({
+        name: v,
+        priority: i + 1,
+      })),
+      autonomy_envelope: {
+        bounded_actions: card.autonomy_envelope.bounded_actions,
+        forbidden_actions: card.autonomy_envelope.forbidden_actions ?? undefined,
+        escalation_triggers: card.autonomy_envelope.escalation_triggers?.map(
+          (t: { condition: string; action: string; reason?: string | null }) => ({
+            condition: t.condition,
+            action: t.action,
+            reason: t.reason ?? undefined,
+          })
+        ),
+      },
+    };
+
+    const config: AIPConfig = {
+      card: aipCard,
+      conscience_values: [...DEFAULT_CONSCIENCE_VALUES],
+      analysis_llm: {
+        model: 'claude-3-5-haiku-20241022',
+        base_url: analysisBaseUrl,
+        api_key: analysisApiKey,
+        max_tokens: 1024,
+      },
+      window: {
+        max_size: 10,
+        mode: 'sliding',
+        session_boundary: 'reset',
+        max_age_seconds: 3600,
+      },
+      failure_policy: {
+        mode: 'fail_open',
+        analysis_timeout_ms: 8000, // Slightly under CF Worker 10s subrequest limit
+      },
+    };
+
+    client = createClient(config);
+    const signal = await client.check(responseBody, provider);
+
+    console.log(
+      `[observer/aip] Integrity check complete: verdict=${signal.checkpoint.verdict}, ` +
+      `proceed=${signal.proceed}, action=${signal.recommended_action}`
+    );
+
+    return signal;
+  } catch (error) {
+    console.error('[observer/aip] Integrity check failed (fail-open):', error);
+    return null;
+  } finally {
+    if (client) {
+      client.destroy();
+    }
+  }
+}
+
+/**
+ * Submit an AIP IntegrityCheckpoint to the integrity_checkpoints Supabase table.
+ * Uses the same upsert pattern as submitTrace for idempotency.
+ */
+async function submitCheckpoint(
+  checkpoint: IntegrityCheckpoint,
+  env: Env
+): Promise<void> {
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?on_conflict=checkpoint_id`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify({
+          checkpoint_id: checkpoint.checkpoint_id,
+          agent_id: checkpoint.agent_id,
+          card_id: checkpoint.card_id,
+          session_id: checkpoint.session_id,
+          timestamp: checkpoint.timestamp,
+          thinking_block_hash: checkpoint.thinking_block_hash,
+          provider: checkpoint.provider,
+          model: checkpoint.model,
+          verdict: checkpoint.verdict,
+          concerns: checkpoint.concerns,
+          reasoning_summary: checkpoint.reasoning_summary,
+          conscience_context: checkpoint.conscience_context,
+          window_position: checkpoint.window_position,
+          analysis_metadata: checkpoint.analysis_metadata,
+          linked_trace_id: checkpoint.linked_trace_id,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.warn(
+        `[observer/aip] Failed to submit checkpoint ${checkpoint.checkpoint_id}: ${response.status} - ${errorText}`
+      );
+    } else {
+      console.log(`[observer/aip] Checkpoint ${checkpoint.checkpoint_id} stored`);
+    }
+  } catch (error) {
+    console.error('[observer/aip] Error submitting checkpoint:', error);
   }
 }
 

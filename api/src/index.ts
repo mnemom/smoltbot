@@ -20,6 +20,12 @@
  * - GET /v1/ssm/:agent_id/timeline - Get similarity timeline data
  * - POST /v1/agents/:id/link - Link claimed agent to authenticated user
  * - GET /v1/auth/me - Get authenticated user info and linked agents
+ * - GET /v1/agents/:id/integrity/aip - AIP integrity score
+ * - GET /v1/agents/:id/checkpoints - Paginated integrity checkpoints
+ * - GET /v1/agents/:id/checkpoints/:checkpoint_id - Single checkpoint
+ * - GET /v1/agents/:id/drift/aip - AIP drift alerts
+ * - POST /v1/aip/webhooks - Register AIP webhook
+ * - DELETE /v1/aip/webhooks/:registration_id - Remove AIP webhook
  */
 
 import { detectDrift, verifyTrace, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
@@ -34,7 +40,7 @@ export interface Env {
 // CORS headers for all responses
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, OPTIONS',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
@@ -195,6 +201,42 @@ async function supabaseUpdate(
     return { data: result, error: null };
   } catch (err) {
     return { data: null, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+// Supabase delete helper
+async function supabaseDelete(
+  env: Env,
+  table: string,
+  filters: Record<string, string | number | boolean>
+): Promise<{ count: number; error: string | null }> {
+  const url = new URL(`${env.SUPABASE_URL}/rest/v1/${table}`);
+
+  // Add filters
+  for (const [key, value] of Object.entries(filters)) {
+    url.searchParams.set(key, `eq.${value}`);
+  }
+
+  try {
+    const response = await fetch(url.toString(), {
+      method: 'DELETE',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { count: 0, error: errorText };
+    }
+
+    const result = await response.json() as unknown[];
+    return { count: result.length, error: null };
+  } catch (err) {
+    return { count: 0, error: err instanceof Error ? err.message : 'Unknown error' };
   }
 }
 
@@ -1252,6 +1294,420 @@ async function handleGetSSMTimeline(env: Env, agentId: string, url: URL): Promis
   });
 }
 
+// ============================================
+// AIP (Agent Integrity Protocol) ENDPOINTS
+// ============================================
+
+async function handleGetAipIntegrity(env: Env, agentId: string): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  // Try RPC function first
+  const rpcUrl = `${env.SUPABASE_URL}/rest/v1/rpc/compute_integrity_score_aip`;
+
+  try {
+    const rpcResponse = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_agent_id: agentId }),
+    });
+
+    if (rpcResponse.ok) {
+      const score = await rpcResponse.json();
+      return jsonResponse(score);
+    }
+  } catch {
+    // Fall through to manual calculation
+  }
+
+  // Manual calculation from integrity_checkpoints table
+  const { data: checkpoints, error } = await supabaseQuery(env, 'integrity_checkpoints', {
+    filters: { agent_id: agentId },
+    select: 'checkpoint_id,verdict,timestamp',
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const checkpointList = checkpoints as Array<{
+    checkpoint_id: string;
+    verdict: string;
+    timestamp: string;
+  }>;
+
+  const totalChecks = checkpointList.length;
+  const clearCount = checkpointList.filter(c => c.verdict === 'clear').length;
+  const reviewCount = checkpointList.filter(c => c.verdict === 'review_needed').length;
+  const violationCount = checkpointList.filter(c => c.verdict === 'boundary_violation').length;
+  const integrityRatio = totalChecks > 0 ? Math.round((clearCount / totalChecks) * 1000) / 1000 : 0;
+
+  // Find the latest verdict by timestamp
+  let latestVerdict: string | null = null;
+  if (checkpointList.length > 0) {
+    const sorted = checkpointList.sort((a, b) =>
+      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+    latestVerdict = sorted[0].verdict;
+  }
+
+  return jsonResponse({
+    agent_id: agentId,
+    total_checks: totalChecks,
+    clear_count: clearCount,
+    review_count: reviewCount,
+    violation_count: violationCount,
+    integrity_ratio: integrityRatio,
+    latest_verdict: latestVerdict,
+  });
+}
+
+async function handleGetCheckpoints(env: Env, agentId: string, url: URL): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 100);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+  const verdict = url.searchParams.get('verdict');
+  const sessionId = url.searchParams.get('session_id');
+
+  if (isNaN(limit) || limit < 1) {
+    return errorResponse('Invalid limit parameter (must be 1-100)', 400);
+  }
+
+  if (isNaN(offset) || offset < 0) {
+    return errorResponse('Invalid offset parameter (must be >= 0)', 400);
+  }
+
+  const filters: Record<string, string | number | boolean> = { agent_id: agentId };
+  if (verdict) {
+    filters.verdict = verdict;
+  }
+  if (sessionId) {
+    filters.session_id = sessionId;
+  }
+
+  // Fetch checkpoints
+  const { data, error } = await supabaseQuery(env, 'integrity_checkpoints', {
+    filters,
+    order: { column: 'timestamp', ascending: false },
+    limit,
+    offset,
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  // Fetch total count with a HEAD-like request using Prefer: count=exact
+  const countUrl = new URL(`${env.SUPABASE_URL}/rest/v1/integrity_checkpoints`);
+  countUrl.searchParams.set('agent_id', `eq.${agentId}`);
+  if (verdict) {
+    countUrl.searchParams.set('verdict', `eq.${verdict}`);
+  }
+  if (sessionId) {
+    countUrl.searchParams.set('session_id', `eq.${sessionId}`);
+  }
+  countUrl.searchParams.set('select', 'checkpoint_id');
+
+  let total = 0;
+  try {
+    const countResponse = await fetch(countUrl.toString(), {
+      method: 'HEAD',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Prefer': 'count=exact',
+      },
+    });
+    const contentRange = countResponse.headers.get('content-range');
+    if (contentRange) {
+      // Format: "0-N/total" or "*/total"
+      const parts = contentRange.split('/');
+      if (parts[1] && parts[1] !== '*') {
+        total = parseInt(parts[1], 10);
+      }
+    }
+  } catch {
+    // If count fails, use the length of the returned data as a fallback
+    total = (data as unknown[])?.length ?? 0;
+  }
+
+  return jsonResponse({
+    checkpoints: data,
+    total,
+    limit,
+    offset,
+  });
+}
+
+async function handleGetCheckpoint(env: Env, agentId: string, checkpointId: string): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+  if (!checkpointId) {
+    return errorResponse('Checkpoint ID is required', 400);
+  }
+
+  const { data, error } = await supabaseQuery(env, 'integrity_checkpoints', {
+    filters: { agent_id: agentId, checkpoint_id: checkpointId },
+    single: true,
+  });
+
+  if (error) {
+    if (error.includes('PGRST116') || error.includes('0 rows')) {
+      return errorResponse('Checkpoint not found', 404);
+    }
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  return jsonResponse(data);
+}
+
+async function handleGetAipDrift(env: Env, agentId: string): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  // Strategy 1: Try querying a drift_alerts table for AIP-specific alerts
+  const { data: alertsData, error: alertsError } = await supabaseQuery(env, 'drift_alerts', {
+    filters: { agent_id: agentId },
+    order: { column: 'detection_timestamp', ascending: false },
+    limit: 50,
+  });
+
+  if (!alertsError && alertsData) {
+    // Filter for AIP alert types (alert_type starting with 'aip:')
+    const allAlerts = alertsData as Array<Record<string, unknown>>;
+    const aipAlerts = allAlerts.filter(a =>
+      typeof a.alert_type === 'string' && (a.alert_type as string).startsWith('aip:')
+    );
+
+    if (aipAlerts.length > 0) {
+      return jsonResponse({ alerts: aipAlerts, agent_id: agentId });
+    }
+  }
+
+  // Strategy 2: Detect drift patterns from integrity_checkpoints
+  // Look for 3+ consecutive non-clear verdicts in the same session
+  const { data: checkpointsData, error: checkpointsError } = await supabaseQuery(env, 'integrity_checkpoints', {
+    filters: { agent_id: agentId },
+    select: 'checkpoint_id,session_id,verdict,timestamp,concerns',
+    order: { column: 'timestamp', ascending: true },
+    limit: 500,
+  });
+
+  if (checkpointsError) {
+    return errorResponse(`Database error: ${checkpointsError}`, 500);
+  }
+
+  const checkpoints = checkpointsData as Array<{
+    checkpoint_id: string;
+    session_id: string;
+    verdict: string;
+    timestamp: string;
+    concerns?: Array<{ category?: string }>;
+  }>;
+
+  // Group by session_id
+  const sessionGroups: Record<string, typeof checkpoints> = {};
+  for (const cp of checkpoints) {
+    if (!sessionGroups[cp.session_id]) {
+      sessionGroups[cp.session_id] = [];
+    }
+    sessionGroups[cp.session_id].push(cp);
+  }
+
+  // Detect consecutive non-clear runs of 3+ in each session
+  const alerts: Array<{
+    alert_id: string;
+    agent_id: string;
+    session_id: string;
+    checkpoint_ids: string[];
+    sustained_checks: number;
+    severity: string;
+    drift_direction: string;
+    message: string;
+    detection_timestamp: string;
+  }> = [];
+
+  for (const [sessionId, sessionCheckpoints] of Object.entries(sessionGroups)) {
+    let consecutiveNonClear: typeof checkpoints = [];
+
+    for (const cp of sessionCheckpoints) {
+      if (cp.verdict !== 'clear') {
+        consecutiveNonClear.push(cp);
+      } else {
+        // Check if run meets threshold before resetting
+        if (consecutiveNonClear.length >= 3) {
+          const checkpointIds = consecutiveNonClear.map(c => c.checkpoint_id);
+          const sustained = consecutiveNonClear.length;
+
+          // Determine drift direction from concerns
+          const allCategories = consecutiveNonClear
+            .flatMap(c => (c.concerns || []).map(con => con.category || 'unknown'));
+          const categoryCounts: Record<string, number> = {};
+          for (const cat of allCategories) {
+            categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+          }
+          const topCategory = Object.entries(categoryCounts)
+            .sort((a, b) => b[1] - a[1])[0]?.[0] || 'unknown';
+
+          // Map concern categories to drift directions
+          const directionMap: Record<string, string> = {
+            'prompt_injection': 'injection_pattern',
+            'value_misalignment': 'value_erosion',
+            'autonomy_violation': 'autonomy_creep',
+            'deception': 'deception_pattern',
+          };
+          const driftDirection = directionMap[topCategory] || 'unknown';
+
+          // Severity based on sustained checks count
+          const severity = sustained >= 7 ? 'high' : sustained >= 5 ? 'medium' : 'low';
+
+          alerts.push({
+            alert_id: `ida-${generateId('drift')}`,
+            agent_id: agentId,
+            session_id: sessionId,
+            checkpoint_ids: checkpointIds,
+            sustained_checks: sustained,
+            severity,
+            drift_direction: driftDirection,
+            message: `Detected ${sustained} consecutive non-clear verdicts in session ${sessionId}`,
+            detection_timestamp: consecutiveNonClear[consecutiveNonClear.length - 1].timestamp,
+          });
+        }
+        consecutiveNonClear = [];
+      }
+    }
+
+    // Check trailing run at end of session
+    if (consecutiveNonClear.length >= 3) {
+      const checkpointIds = consecutiveNonClear.map(c => c.checkpoint_id);
+      const sustained = consecutiveNonClear.length;
+      const allCategories = consecutiveNonClear
+        .flatMap(c => (c.concerns || []).map(con => con.category || 'unknown'));
+      const categoryCounts: Record<string, number> = {};
+      for (const cat of allCategories) {
+        categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+      }
+      const topCategory = Object.entries(categoryCounts)
+        .sort((a, b) => b[1] - a[1])[0]?.[0] || 'unknown';
+      const directionMap: Record<string, string> = {
+        'prompt_injection': 'injection_pattern',
+        'value_misalignment': 'value_erosion',
+        'autonomy_violation': 'autonomy_creep',
+        'deception': 'deception_pattern',
+      };
+      const driftDirection = directionMap[topCategory] || 'unknown';
+      const severity = sustained >= 7 ? 'high' : sustained >= 5 ? 'medium' : 'low';
+
+      alerts.push({
+        alert_id: `ida-${generateId('drift')}`,
+        agent_id: agentId,
+        session_id: sessionId,
+        checkpoint_ids: checkpointIds,
+        sustained_checks: sustained,
+        severity,
+        drift_direction: driftDirection,
+        message: `Detected ${sustained} consecutive non-clear verdicts in session ${sessionId}`,
+        detection_timestamp: consecutiveNonClear[consecutiveNonClear.length - 1].timestamp,
+      });
+    }
+  }
+
+  return jsonResponse({ alerts, agent_id: agentId });
+}
+
+async function handleRegisterAipWebhook(env: Env, request: Request): Promise<Response> {
+  // Parse request body
+  let body: { agent_id?: string; callback_url?: string; secret?: string; events?: string[] };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON body', 400);
+  }
+
+  if (!body.agent_id) {
+    return errorResponse('agent_id is required', 400);
+  }
+  if (!body.callback_url) {
+    return errorResponse('callback_url is required', 400);
+  }
+  if (!body.secret) {
+    return errorResponse('secret is required', 400);
+  }
+  if (!body.events || !Array.isArray(body.events) || body.events.length === 0) {
+    return errorResponse('events must be a non-empty array of event types', 400);
+  }
+
+  // Validate callback_url is a valid URL
+  try {
+    new URL(body.callback_url);
+  } catch {
+    return errorResponse('callback_url must be a valid URL', 400);
+  }
+
+  // Hash the secret before storing
+  const secretHash = await sha256(body.secret);
+
+  const registrationId = generateId('awh');
+  const now = new Date().toISOString();
+
+  const registrationData = {
+    registration_id: registrationId,
+    agent_id: body.agent_id,
+    callback_url: body.callback_url,
+    secret_hash: secretHash,
+    events: body.events,
+    created_at: now,
+  };
+
+  const { data, error } = await supabaseInsert(env, 'aip_webhook_registrations', registrationData);
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  // Return without the secret_hash
+  return jsonResponse({
+    registration_id: registrationId,
+    agent_id: body.agent_id,
+    callback_url: body.callback_url,
+    events: body.events,
+    created_at: now,
+  }, 201);
+}
+
+async function handleDeleteAipWebhook(env: Env, registrationId: string): Promise<Response> {
+  if (!registrationId) {
+    return errorResponse('Registration ID is required', 400);
+  }
+
+  const { count, error } = await supabaseDelete(env, 'aip_webhook_registrations', {
+    registration_id: registrationId,
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  if (count === 0) {
+    return errorResponse('Webhook registration not found', 404);
+  }
+
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
+}
+
 // Main request handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -1384,6 +1840,45 @@ export default {
       const ssmMatch = path.match(/^\/v1\/ssm\/([^/]+)$/);
       if (ssmMatch && method === 'GET') {
         return handleGetSSM(env, ssmMatch[1], url);
+      }
+
+      // ============================================
+      // AIP ROUTES
+      // ============================================
+
+      // GET /v1/agents/:id/integrity/aip - AIP integrity score
+      const aipIntegrityMatch = path.match(/^\/v1\/agents\/([^/]+)\/integrity\/aip$/);
+      if (aipIntegrityMatch && method === 'GET') {
+        return handleGetAipIntegrity(env, aipIntegrityMatch[1]);
+      }
+
+      // GET /v1/agents/:id/checkpoints/:checkpoint_id - Single checkpoint (must come before list route)
+      const checkpointSingleMatch = path.match(/^\/v1\/agents\/([^/]+)\/checkpoints\/([^/]+)$/);
+      if (checkpointSingleMatch && method === 'GET') {
+        return handleGetCheckpoint(env, checkpointSingleMatch[1], checkpointSingleMatch[2]);
+      }
+
+      // GET /v1/agents/:id/checkpoints - Paginated checkpoints
+      const checkpointsMatch = path.match(/^\/v1\/agents\/([^/]+)\/checkpoints$/);
+      if (checkpointsMatch && method === 'GET') {
+        return handleGetCheckpoints(env, checkpointsMatch[1], url);
+      }
+
+      // GET /v1/agents/:id/drift/aip - AIP drift alerts
+      const aipDriftMatch = path.match(/^\/v1\/agents\/([^/]+)\/drift\/aip$/);
+      if (aipDriftMatch && method === 'GET') {
+        return handleGetAipDrift(env, aipDriftMatch[1]);
+      }
+
+      // POST /v1/aip/webhooks - Register AIP webhook
+      if (path === '/v1/aip/webhooks' && method === 'POST') {
+        return handleRegisterAipWebhook(env, request);
+      }
+
+      // DELETE /v1/aip/webhooks/:registration_id - Remove AIP webhook
+      const aipWebhookDeleteMatch = path.match(/^\/v1\/aip\/webhooks\/([^/]+)$/);
+      if (aipWebhookDeleteMatch && method === 'DELETE') {
+        return handleDeleteAipWebhook(env, aipWebhookDeleteMatch[1]);
       }
 
       // 404 for unmatched routes
