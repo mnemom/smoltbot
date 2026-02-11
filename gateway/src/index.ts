@@ -814,10 +814,11 @@ export async function handleAnthropicProxy(
     forwardHeaders.set('cf-aig-authorization', `Bearer ${env.CF_AIG_TOKEN}`);
 
     // Forward the request with potentially modified body
+    // GET/HEAD requests cannot have a body per the Fetch spec
     const forwardRequest = new Request(forwardUrl, {
       method: request.method,
       headers: forwardHeaders,
-      body: modifiedBody,
+      ...(request.method !== 'GET' && request.method !== 'HEAD' ? { body: modifiedBody } : {}),
     });
 
     const response = await fetch(forwardRequest);

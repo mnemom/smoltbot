@@ -528,13 +528,10 @@ describe('handleAnthropicProxy', () => {
       json: () => Promise.resolve([existingAgent]),
     });
 
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: 'OK',
-      headers: new Headers(),
-      body: null,
-    });
+    // Must be a real Response so .text() works when the AIP pipeline buffers it
+    mockFetch.mockResolvedValueOnce(
+      new Response(null, { status: 200, statusText: 'OK' })
+    );
 
     const request = new Request('https://gateway.smoltbot.com/anthropic/v1/messages', {
       method: 'POST',
