@@ -7,6 +7,9 @@
     "deploy": "wrangler deploy",
     "test": "vitest"
   },
+  "dependencies": {
+    "@mnemom/agent-integrity-protocol": "file:../../aip/packages/typescript"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
     "typescript": "^5.3.3",

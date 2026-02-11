@@ -6,7 +6,34 @@
  * 2. Identifies agents via API key hashing (zero-config)
  * 3. Attaches metadata for tracing via CF AI Gateway
  * 4. Forwards requests and returns responses transparently
+ * 5. [Wave 1] Injects extended thinking into requests
+ * 6. [Wave 2] Performs real-time AIP integrity checking on responses
+ * 7. [Wave 4] Delivers webhook notifications for integrity events
  */
+
+import {
+  checkIntegrity,
+  buildSignal,
+  buildConsciencePrompt,
+  detectIntegrityDrift,
+  createDriftState,
+  createAdapterRegistry,
+  WindowManager,
+  DEFAULT_CONSCIENCE_VALUES,
+  WEBHOOK_RETRY_DELAYS_MS,
+  AIP_VERSION,
+  CHECKPOINT_ID_PREFIX,
+  type IntegrityCheckpoint,
+  type AlignmentCard as AIPAlignmentCard,
+  type AlignmentCardValue,
+  type DriftState,
+  type CheckIntegrityInput,
+  type ConscienceValue,
+} from '@mnemom/agent-integrity-protocol';
+
+// ============================================================================
+// Types
+// ============================================================================
 
 export interface Env {
   SUPABASE_URL: string;
@@ -14,6 +41,8 @@ export interface Env {
   CF_AI_GATEWAY_URL: string;
   CF_AIG_TOKEN: string;  // AI Gateway authentication token
   GATEWAY_VERSION: string;
+  ANTHROPIC_API_KEY: string;  // For AIP analysis LLM calls
+  AIP_ENABLED: string;        // Feature flag ("true"/"false"), default "true"
 }
 
 interface Agent {
@@ -34,6 +63,10 @@ interface AlignmentCard {
   created_at: string;
   updated_at: string;
 }
+
+// ============================================================================
+// Core Utility Functions
+// ============================================================================
 
 /**
  * Hash an API key using SHA-256 and return the first 16 hex characters.
@@ -56,6 +89,35 @@ export function generateSessionId(agentHash: string): string {
   const hourBucket = Math.floor(Date.now() / (1000 * 60 * 60));
   return `${agentHash}-${hourBucket}`;
 }
+
+/**
+ * Generate a random hex string of specified length.
+ * Uses crypto.getRandomValues for Cloudflare Workers compatibility.
+ */
+function randomHex(length: number): string {
+  const bytes = new Uint8Array(Math.ceil(length / 2));
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+    .slice(0, length);
+}
+
+/**
+ * Compute SHA-256 hash of a string using Web Crypto API.
+ * Used for thinking block hashing in Workers environment (no node:crypto).
+ */
+async function sha256(content: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(content);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ============================================================================
+// Agent Management Functions
+// ============================================================================
 
 /**
  * Lookup or create an agent in Supabase by their hash.
@@ -234,6 +296,409 @@ export function buildMetadataHeader(
   return JSON.stringify(metadata);
 }
 
+// ============================================================================
+// AIP Helper Functions
+// ============================================================================
+
+/**
+ * Map AAP card_json to AIP AlignmentCard interface.
+ * Same mapping pattern used by the observer.
+ */
+function mapCardToAIP(cardJson: Record<string, any>): AIPAlignmentCard {
+  const declaredValues: string[] = cardJson.values?.declared || [];
+  const values: AlignmentCardValue[] = declaredValues.map((v: string, i: number) => ({
+    name: v,
+    priority: i + 1,
+  }));
+
+  return {
+    card_id: cardJson.card_id || 'unknown',
+    values,
+    autonomy_envelope: {
+      bounded_actions: cardJson.autonomy_envelope?.bounded_actions ?? [],
+      forbidden_actions: cardJson.autonomy_envelope?.forbidden_actions ?? undefined,
+      escalation_triggers: cardJson.autonomy_envelope?.escalation_triggers?.map(
+        (t: { condition: string; action: string; reason?: string | null }) => ({
+          condition: t.condition,
+          action: t.action,
+          reason: t.reason ?? undefined,
+        })
+      ),
+    },
+  };
+}
+
+/**
+ * Fetch alignment card, conscience values, and enforcement mode for an agent.
+ */
+async function fetchAlignmentData(
+  agentId: string,
+  env: Env
+): Promise<{
+  card: Record<string, any> | null;
+  conscienceValues: ConscienceValue[] | null;
+  enforcementMode: string;
+}> {
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`[gateway/aip] Failed to fetch card for ${agentId}: ${response.status}`);
+      return { card: null, conscienceValues: null, enforcementMode: 'observe' };
+    }
+
+    const cards = (await response.json()) as Array<{
+      card_json: Record<string, any>;
+      conscience_values?: ConscienceValue[];
+      enforcement_mode?: string;
+    }>;
+
+    if (cards.length === 0) {
+      return { card: null, conscienceValues: null, enforcementMode: 'observe' };
+    }
+
+    const row = cards[0];
+    return {
+      card: row.card_json || null,
+      conscienceValues: row.conscience_values || null,
+      enforcementMode: row.enforcement_mode || 'observe',
+    };
+  } catch (error) {
+    console.error(`[gateway/aip] Error fetching alignment data for ${agentId}:`, error);
+    return { card: null, conscienceValues: null, enforcementMode: 'observe' };
+  }
+}
+
+/**
+ * Fetch recent checkpoints for window hydration.
+ */
+async function fetchRecentCheckpoints(
+  agentId: string,
+  sessionId: string,
+  env: Env
+): Promise<IntegrityCheckpoint[]> {
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&session_id=eq.${sessionId}&order=timestamp.desc&limit=10`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`[gateway/aip] Failed to fetch checkpoints: ${response.status}`);
+      return [];
+    }
+
+    const rows = (await response.json()) as IntegrityCheckpoint[];
+    // Reverse to chronological order (oldest first) for window hydration
+    return rows.reverse();
+  } catch (error) {
+    console.error(`[gateway/aip] Error fetching checkpoints:`, error);
+    return [];
+  }
+}
+
+/**
+ * Store checkpoint to Supabase.
+ * Same upsert pattern as the observer's submitCheckpoint.
+ */
+async function storeCheckpoint(
+  checkpoint: IntegrityCheckpoint,
+  source: string,
+  env: Env
+): Promise<void> {
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?on_conflict=checkpoint_id`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify({
+          checkpoint_id: checkpoint.checkpoint_id,
+          agent_id: checkpoint.agent_id,
+          card_id: checkpoint.card_id,
+          session_id: checkpoint.session_id,
+          timestamp: checkpoint.timestamp,
+          thinking_block_hash: checkpoint.thinking_block_hash,
+          provider: checkpoint.provider,
+          model: checkpoint.model,
+          verdict: checkpoint.verdict,
+          concerns: checkpoint.concerns,
+          reasoning_summary: checkpoint.reasoning_summary,
+          conscience_context: checkpoint.conscience_context,
+          window_position: checkpoint.window_position,
+          analysis_metadata: checkpoint.analysis_metadata,
+          linked_trace_id: checkpoint.linked_trace_id,
+          source,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.warn(
+        `[gateway/aip] Failed to store checkpoint ${checkpoint.checkpoint_id}: ${response.status} - ${errorText}`
+      );
+    } else {
+      console.log(`[gateway/aip] Checkpoint ${checkpoint.checkpoint_id} stored (source: ${source})`);
+    }
+  } catch (error) {
+    console.error('[gateway/aip] Error storing checkpoint:', error);
+  }
+}
+
+/**
+ * Call analysis LLM (Haiku) with system+user prompt.
+ * POSTs directly to Anthropic API (NOT through the gateway — that would be recursive).
+ * Uses AbortController with 8000ms timeout.
+ */
+async function callAnalysisLLM(
+  system: string,
+  user: string,
+  env: Env
+): Promise<string> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-3-5-haiku-20241022',
+        max_tokens: 1024,
+        system,
+        messages: [{ role: 'user', content: user }],
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Analysis LLM returned ${response.status}: ${errorText}`);
+    }
+
+    const body = (await response.json()) as Record<string, unknown>;
+    const content = body.content as Array<Record<string, unknown>> | undefined;
+
+    if (!content || content.length === 0) {
+      throw new Error('Analysis LLM returned empty content');
+    }
+
+    const textBlock = content.find((b) => b.type === 'text');
+    if (!textBlock || typeof textBlock.text !== 'string') {
+      throw new Error('Analysis LLM returned no text content');
+    }
+
+    return textBlock.text;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * HMAC sign payload using Web Crypto API (Cloudflare Workers compatible).
+ */
+async function hmacSign(secret: string, payload: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
+  return Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Deliver webhooks for a checkpoint (Wave 4).
+ *
+ * 1. Query registered webhooks for the agent
+ * 2. Filter by matching event types
+ * 3. Sign and POST each webhook with retry
+ * 4. Track deliveries in aip_webhook_deliveries table
+ * 5. Increment failure_count on registration if all retries exhausted
+ */
+async function deliverWebhooks(
+  checkpoint: IntegrityCheckpoint,
+  env: Env
+): Promise<void> {
+  try {
+    // 1. Fetch webhook registrations for this agent
+    const regResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/aip_webhook_registrations?agent_id=eq.${checkpoint.agent_id}&select=*`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!regResponse.ok) {
+      console.warn(`[gateway/webhook] Failed to fetch registrations: ${regResponse.status}`);
+      return;
+    }
+
+    const registrations = (await regResponse.json()) as Array<{
+      id: string;
+      agent_id: string;
+      callback_url: string;
+      secret: string;
+      event_types: string[];
+      failure_count: number;
+    }>;
+
+    if (registrations.length === 0) return;
+
+    // 2. Determine event type for this checkpoint
+    const eventType = `verdict.${checkpoint.verdict}`;
+
+    // 3. Filter registrations by matching event types
+    const matchingRegistrations = registrations.filter(reg => {
+      return reg.event_types.some(et =>
+        et === '*' ||
+        et === 'verdict.*' ||
+        et === eventType
+      );
+    });
+
+    if (matchingRegistrations.length === 0) return;
+
+    // 4. Build webhook payload
+    const webhookPayload = {
+      event: eventType,
+      timestamp: new Date().toISOString(),
+      checkpoint: {
+        checkpoint_id: checkpoint.checkpoint_id,
+        agent_id: checkpoint.agent_id,
+        verdict: checkpoint.verdict,
+        concerns: checkpoint.concerns,
+        reasoning_summary: checkpoint.reasoning_summary,
+      },
+    };
+
+    const payloadString = JSON.stringify(webhookPayload);
+
+    // 5. Deliver to each matching registration
+    for (const reg of matchingRegistrations) {
+      let delivered = false;
+      let lastError: string | null = null;
+      const retryDelays = [...WEBHOOK_RETRY_DELAYS_MS];
+
+      // Sign the payload
+      const signature = await hmacSign(reg.secret, payloadString);
+
+      // Initial attempt + retries
+      for (let attempt = 0; attempt <= retryDelays.length; attempt++) {
+        try {
+          const webhookResponse = await fetch(reg.callback_url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-AIP-Signature': `sha256=${signature}`,
+              'X-AIP-Version': AIP_VERSION,
+            },
+            body: payloadString,
+          });
+
+          if (webhookResponse.ok || (webhookResponse.status >= 200 && webhookResponse.status < 300)) {
+            delivered = true;
+            break;
+          }
+
+          lastError = `HTTP ${webhookResponse.status}`;
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
+        }
+
+        // Wait before retry (skip delay after last attempt)
+        if (attempt < retryDelays.length) {
+          await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]));
+        }
+      }
+
+      // 6. Track delivery in aip_webhook_deliveries
+      try {
+        await fetch(`${env.SUPABASE_URL}/rest/v1/aip_webhook_deliveries`, {
+          method: 'POST',
+          headers: {
+            apikey: env.SUPABASE_KEY,
+            Authorization: `Bearer ${env.SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          },
+          body: JSON.stringify({
+            id: `del-${randomHex(12)}`,
+            registration_id: reg.id,
+            checkpoint_id: checkpoint.checkpoint_id,
+            event_type: eventType,
+            delivered,
+            attempts: delivered ? 1 : retryDelays.length + 1,
+            last_error: lastError,
+          }),
+        });
+      } catch (error) {
+        console.warn(`[gateway/webhook] Failed to record delivery:`, error);
+      }
+
+      // 7. On all retries exhausted, increment failure_count
+      if (!delivered) {
+        console.warn(
+          `[gateway/webhook] All retries exhausted for registration ${reg.id} -> ${reg.callback_url}`
+        );
+        try {
+          await fetch(
+            `${env.SUPABASE_URL}/rest/v1/aip_webhook_registrations?id=eq.${reg.id}`,
+            {
+              method: 'PATCH',
+              headers: {
+                apikey: env.SUPABASE_KEY,
+                Authorization: `Bearer ${env.SUPABASE_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                failure_count: reg.failure_count + 1,
+              }),
+            }
+          );
+        } catch (error) {
+          console.warn(`[gateway/webhook] Failed to increment failure_count:`, error);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('[gateway/webhook] Webhook delivery failed:', error);
+  }
+}
+
+// ============================================================================
+// Health Check
+// ============================================================================
+
 /**
  * Handle the health check endpoint.
  */
@@ -243,6 +708,7 @@ export function handleHealthCheck(env: Env): Response {
       status: 'ok',
       version: env.GATEWAY_VERSION,
       timestamp: new Date().toISOString(),
+      aip_enabled: (env.AIP_ENABLED ?? 'true') !== 'false',
     }),
     {
       status: 200,
@@ -251,8 +717,16 @@ export function handleHealthCheck(env: Env): Response {
   );
 }
 
+// ============================================================================
+// Anthropic Proxy Handler (Waves 1, 2, 4)
+// ============================================================================
+
 /**
  * Handle Anthropic API proxy requests.
+ *
+ * Wave 1: Extended thinking injection
+ * Wave 2: Real-time AIP integrity checking
+ * Wave 4: Webhook delivery for integrity events
  */
 export async function handleAnthropicProxy(
   request: Request,
@@ -292,6 +766,29 @@ export async function handleAnthropicProxy(
       env.GATEWAY_VERSION
     );
 
+    // ====================================================================
+    // Wave 1: Extended thinking injection
+    // ====================================================================
+
+    // Clone and parse request body for potential modification
+    const originalBody = await request.text();
+    let requestBody: Record<string, any> | null = null;
+    let modifiedBody = originalBody;
+
+    try {
+      requestBody = JSON.parse(originalBody);
+
+      // Inject extended thinking if not already set
+      if (requestBody && !requestBody.thinking) {
+        requestBody.thinking = { type: 'enabled', budget_tokens: 10000 };
+      }
+
+      modifiedBody = JSON.stringify(requestBody);
+    } catch {
+      // Body is not valid JSON — forward as-is
+      console.warn('[gateway] Request body is not valid JSON, forwarding as-is');
+    }
+
     // Build the forwarding URL
     const url = new URL(request.url);
     const path = url.pathname.replace(/^\/anthropic/, '');
@@ -301,17 +798,26 @@ export async function handleAnthropicProxy(
     const forwardHeaders = new Headers(request.headers);
     forwardHeaders.set('cf-aig-metadata', metadataHeader);
     forwardHeaders.set('cf-aig-authorization', `Bearer ${env.CF_AIG_TOKEN}`);
+    // Set anthropic-version for extended thinking support
+    forwardHeaders.set('anthropic-version', '2025-04-15');
 
-    // Forward the request
+    // Forward the request with potentially modified body
     const forwardRequest = new Request(forwardUrl, {
       method: request.method,
       headers: forwardHeaders,
-      body: request.body,
+      body: modifiedBody,
     });
 
     const response = await fetch(forwardRequest);
 
-    // Clone response and add smoltbot headers
+    // ====================================================================
+    // Wave 2: Real-time AIP integrity checking
+    // ====================================================================
+
+    const aipEnabled = (env.AIP_ENABLED ?? 'true') !== 'false';
+    const isStreaming = requestBody?.stream === true;
+
+    // Clone response headers as base for our response
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set('x-smoltbot-agent', agent.id);
     responseHeaders.set('x-smoltbot-session', sessionId);
@@ -320,11 +826,200 @@ export async function handleAnthropicProxy(
     ctx.waitUntil(updateLastSeen(agent.id, env));
     ctx.waitUntil(ensureAlignmentCard(agent.id, env));
 
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: responseHeaders,
-    });
+    // If AIP disabled, forward response unchanged
+    if (!aipEnabled) {
+      responseHeaders.set('X-AIP-Verdict', 'disabled');
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    }
+
+    // If streaming, skip AIP (cannot buffer SSE for analysis)
+    if (isStreaming) {
+      responseHeaders.set('X-AIP-Verdict', 'skipped');
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    }
+
+    // Buffer the full response for analysis
+    const responseBodyText = await response.text();
+
+    // Fail-open wrapper: entire AIP pipeline wrapped in try/catch
+    try {
+      // Fetch alignment data and recent checkpoints in parallel
+      const [alignmentData, historicalCheckpoints] = await Promise.all([
+        fetchAlignmentData(agent.id, env),
+        fetchRecentCheckpoints(agent.id, sessionId, env),
+      ]);
+
+      const { card, conscienceValues, enforcementMode } = alignmentData;
+
+      // If no card available, forward with clear verdict
+      if (!card) {
+        console.log('[gateway/aip] No alignment card found, forwarding as clear');
+        responseHeaders.set('X-AIP-Verdict', 'clear');
+        responseHeaders.set('X-AIP-Synthetic', 'true');
+        return new Response(responseBodyText, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeaders,
+        });
+      }
+
+      // Map AAP card to AIP format
+      const aipCard = mapCardToAIP(card);
+
+      // Create WindowManager and hydrate with historical checkpoints
+      const windowConfig = {
+        max_size: 10,
+        mode: 'sliding' as const,
+        session_boundary: 'reset' as const,
+        max_age_seconds: 3600,
+      };
+      const window = new WindowManager(windowConfig, sessionId);
+
+      // Hydrate window with historical checkpoints
+      for (const cp of historicalCheckpoints) {
+        window.push(cp);
+      }
+
+      // Extract thinking block from response using Anthropic adapter
+      const registry = createAdapterRegistry();
+      const adapter = registry.get('anthropic');
+      const thinking = adapter.extractThinking(responseBodyText);
+
+      // If no thinking block found, forward with clear verdict
+      if (!thinking) {
+        console.log('[gateway/aip] No thinking block found in response');
+        responseHeaders.set('X-AIP-Verdict', 'clear');
+        responseHeaders.set('X-AIP-Synthetic', 'true');
+        return new Response(responseBodyText, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeaders,
+        });
+      }
+
+      // Build conscience prompt
+      const values: ConscienceValue[] = conscienceValues || [...DEFAULT_CONSCIENCE_VALUES];
+      const prompt = buildConsciencePrompt({
+        card: aipCard,
+        conscienceValues: values,
+        windowContext: window.getState().checkpoints,
+        thinkingBlock: thinking.content,
+      });
+
+      // Call analysis LLM (Haiku)
+      const analysisStartTime = Date.now();
+      const analysisResponseText = await callAnalysisLLM(prompt.system, prompt.user, env);
+      const analysisDurationMs = Date.now() - analysisStartTime;
+
+      // Hash thinking block using Web Crypto API
+      const thinkingHash = await sha256(thinking.content);
+
+      // Build checkpoint via checkIntegrity
+      const windowState = window.getState();
+      const checkpoint = checkIntegrity({
+        analysisResponse: analysisResponseText,
+        thinking: {
+          hash: thinkingHash,
+          provider: thinking.provider,
+          model: thinking.model,
+          tokensOriginal: prompt.originalTokens,
+          tokensAnalyzed: prompt.analyzedTokens,
+          truncated: prompt.truncated,
+          confidence: thinking.confidence,
+        },
+        agentId: agent.id,
+        cardId: aipCard.card_id,
+        sessionId,
+        windowPosition: {
+          index: windowState.size,
+          window_size: windowState.size + 1,
+        },
+        analysisModel: 'claude-3-5-haiku-20241022',
+        analysisDurationMs,
+      });
+
+      // Push to window, get summary, build signal
+      window.push(checkpoint);
+      const summary = window.getSummary();
+      const signal = buildSignal(checkpoint, summary);
+
+      // Detect drift
+      let driftState: DriftState = createDriftState();
+      const driftResult = detectIntegrityDrift(
+        driftState,
+        checkpoint,
+        window.getState().checkpoints,
+      );
+      driftState = driftResult.state;
+
+      if (driftResult.alert) {
+        summary.drift_alert_active = true;
+      }
+
+      // Set AIP headers
+      responseHeaders.set('X-AIP-Verdict', checkpoint.verdict);
+      responseHeaders.set('X-AIP-Checkpoint-Id', checkpoint.checkpoint_id);
+      responseHeaders.set('X-AIP-Action', signal.recommended_action);
+      responseHeaders.set('X-AIP-Proceed', String(signal.proceed));
+
+      // Background: store checkpoint and deliver webhooks
+      ctx.waitUntil(storeCheckpoint(checkpoint, 'gateway', env));
+      ctx.waitUntil(deliverWebhooks(checkpoint, env));
+
+      // Apply enforcement
+      if (enforcementMode === 'enforce' && checkpoint.verdict === 'boundary_violation') {
+        // Enforce mode + boundary violation: return 403
+        return new Response(
+          JSON.stringify({
+            error: 'Request blocked by integrity check',
+            type: 'integrity_violation',
+            checkpoint: {
+              checkpoint_id: checkpoint.checkpoint_id,
+              verdict: checkpoint.verdict,
+              concerns: checkpoint.concerns,
+              reasoning_summary: checkpoint.reasoning_summary,
+              recommended_action: signal.recommended_action,
+            },
+          }),
+          {
+            status: 403,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-AIP-Verdict': checkpoint.verdict,
+              'X-AIP-Checkpoint-Id': checkpoint.checkpoint_id,
+              'X-AIP-Action': signal.recommended_action,
+              'X-AIP-Proceed': String(signal.proceed),
+              'x-smoltbot-agent': agent.id,
+              'x-smoltbot-session': sessionId,
+            },
+          }
+        );
+      }
+
+      // Observe mode or enforce mode with non-violation: forward response with AIP headers
+      return new Response(responseBodyText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    } catch (aipError) {
+      // Fail-open: log error, set error header, forward response unchanged
+      console.error('[gateway/aip] AIP pipeline error (fail-open):', aipError);
+      responseHeaders.set('X-AIP-Verdict', 'error');
+      return new Response(responseBodyText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    }
   } catch (error) {
     console.error('Gateway error:', error);
     return new Response(
@@ -341,9 +1036,10 @@ export async function handleAnthropicProxy(
   }
 }
 
-/**
- * Main request handler.
- */
+// ============================================================================
+// Main Request Handler
+// ============================================================================
+
 export default {
   async fetch(
     request: Request,
@@ -361,6 +1057,7 @@ export default {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type, x-api-key, anthropic-version, anthropic-beta',
+          'Access-Control-Expose-Headers': 'x-smoltbot-agent, x-smoltbot-session, X-AIP-Verdict, X-AIP-Checkpoint-Id, X-AIP-Action, X-AIP-Proceed, X-AIP-Synthetic',
           'Access-Control-Max-Age': '86400',
         },
       });
