@@ -19,7 +19,10 @@ function createTestEnv(overrides?: Partial<Env>): Env {
     SUPABASE_URL: 'https://test.supabase.co',
     SUPABASE_KEY: 'test-supabase-key',
     CF_AI_GATEWAY_URL: 'https://gateway.ai.cloudflare.com/v1/test',
+    CF_AIG_TOKEN: 'test-aig-token',
     GATEWAY_VERSION: '2.0.0',
+    ANTHROPIC_API_KEY: 'test-anthropic-key',
+    AIP_ENABLED: 'false',
     ...overrides,
   };
 }
@@ -420,14 +423,14 @@ describe('handleAnthropicProxy', () => {
       json: () => Promise.resolve([existingAgent]),
     });
 
-    // Forward request
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      statusText: 'OK',
-      headers: new Headers({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ id: 'msg_123' }),
-    });
+    // Forward request — must be a real Response so .text() works
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: 'msg_123' }), {
+        status: 200,
+        statusText: 'OK',
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
 
     // Use GET request without body to avoid Node.js duplex stream issues
     const request = new Request('https://gateway.smoltbot.com/anthropic/v1/models', {
@@ -442,7 +445,6 @@ describe('handleAnthropicProxy', () => {
 
     // Verify forward request was made
     // Calls: 1) agent lookup, 2) forward to CF gateway
-    // Note: updateLastSeen is called via ctx.waitUntil but may execute synchronously in tests
     expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
     const forwardCall = mockFetch.mock.calls[1];
     expect(forwardCall[0].url).toContain(env.CF_AI_GATEWAY_URL);
