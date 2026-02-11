@@ -26,9 +26,15 @@
  * - GET /v1/agents/:id/drift/aip - AIP drift alerts
  * - POST /v1/aip/webhooks - Register AIP webhook
  * - DELETE /v1/aip/webhooks/:registration_id - Remove AIP webhook
+ * - GET /v1/agents/:id/conscience-values - Get conscience values for agent
+ * - PUT /v1/agents/:id/conscience-values - Update conscience values for agent
+ * - DELETE /v1/agents/:id/conscience-values - Reset conscience values to defaults
+ * - GET /v1/agents/:id/enforcement - Get AIP enforcement mode
+ * - PUT /v1/agents/:id/enforcement - Update AIP enforcement mode
  */
 
 import { detectDrift, verifyTrace, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
+import { DEFAULT_CONSCIENCE_VALUES } from '@mnemom/agent-integrity-protocol';
 
 export interface Env {
   SUPABASE_URL: string;
@@ -1664,6 +1670,7 @@ async function handleRegisterAipWebhook(env: Env, request: Request): Promise<Res
     registration_id: registrationId,
     agent_id: body.agent_id,
     callback_url: body.callback_url,
+    secret: body.secret,
     secret_hash: secretHash,
     events: body.events,
     created_at: now,
@@ -1705,6 +1712,196 @@ async function handleDeleteAipWebhook(env: Env, registrationId: string): Promise
   return new Response(null, {
     status: 204,
     headers: corsHeaders,
+  });
+}
+
+// ============================================
+// CONSCIENCE VALUES ENDPOINTS (Phase 4)
+// ============================================
+
+const VALID_CONSCIENCE_TYPES = ['BOUNDARY', 'FEAR', 'COMMITMENT', 'BELIEF', 'HOPE'] as const;
+
+async function handleGetConscienceValues(env: Env, agentId: string): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  // Get active alignment card for the agent
+  const { data, error } = await supabaseQuery(env, 'alignment_cards', {
+    select: 'conscience_values',
+    filters: { agent_id: agentId, is_active: true },
+    single: true,
+  });
+
+  if (error) {
+    if (error.includes('PGRST116') || error.includes('0 rows')) {
+      return errorResponse('Alignment card not found for agent', 404);
+    }
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const card = data as { conscience_values: unknown[] | null };
+  const isDefault = card.conscience_values === null || card.conscience_values === undefined;
+  const conscienceValues = isDefault ? DEFAULT_CONSCIENCE_VALUES : card.conscience_values;
+
+  return jsonResponse({
+    agent_id: agentId,
+    conscience_values: conscienceValues,
+    is_default: isDefault,
+  });
+}
+
+async function handlePutConscienceValues(env: Env, agentId: string, request: Request): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  let body: { conscience_values: Array<{ type: string; name: string; content: string }> };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON body', 400);
+  }
+
+  if (!body.conscience_values || !Array.isArray(body.conscience_values)) {
+    return errorResponse('conscience_values must be an array', 400);
+  }
+
+  // Validate each value
+  for (let i = 0; i < body.conscience_values.length; i++) {
+    const val = body.conscience_values[i];
+    if (!val.type || !VALID_CONSCIENCE_TYPES.includes(val.type as typeof VALID_CONSCIENCE_TYPES[number])) {
+      return errorResponse(
+        `conscience_values[${i}].type must be one of: ${VALID_CONSCIENCE_TYPES.join(', ')}`,
+        400
+      );
+    }
+    if (!val.name || typeof val.name !== 'string') {
+      return errorResponse(`conscience_values[${i}].name must be a non-empty string`, 400);
+    }
+    if (!val.content || typeof val.content !== 'string') {
+      return errorResponse(`conscience_values[${i}].content must be a non-empty string`, 400);
+    }
+  }
+
+  // Update the alignment card
+  const { data, error } = await supabaseUpdate(
+    env,
+    'alignment_cards',
+    { agent_id: agentId, is_active: true },
+    { conscience_values: body.conscience_values }
+  );
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const result = data as unknown[];
+  if (!result || result.length === 0) {
+    return errorResponse('Alignment card not found for agent', 404);
+  }
+
+  return jsonResponse({
+    agent_id: agentId,
+    conscience_values: body.conscience_values,
+    updated: true,
+  });
+}
+
+async function handleDeleteConscienceValues(env: Env, agentId: string): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  // Set conscience_values to null (reset to defaults)
+  const { data, error } = await supabaseUpdate(
+    env,
+    'alignment_cards',
+    { agent_id: agentId, is_active: true },
+    { conscience_values: null }
+  );
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const result = data as unknown[];
+  if (!result || result.length === 0) {
+    return errorResponse('Alignment card not found for agent', 404);
+  }
+
+  return jsonResponse({
+    agent_id: agentId,
+    reset_to_defaults: true,
+  });
+}
+
+// ============================================
+// ENFORCEMENT MODE ENDPOINTS (Phase 4)
+// ============================================
+
+async function handleGetEnforcement(env: Env, agentId: string): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  const { data, error } = await supabaseQuery(env, 'agents', {
+    select: 'aip_enforcement_mode',
+    eq: ['id', agentId],
+    single: true,
+  });
+
+  if (error) {
+    if (error.includes('PGRST116') || error.includes('0 rows')) {
+      return errorResponse('Agent not found', 404);
+    }
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const agent = data as { aip_enforcement_mode: string | null };
+
+  return jsonResponse({
+    agent_id: agentId,
+    enforcement_mode: agent.aip_enforcement_mode || 'observe',
+  });
+}
+
+async function handlePutEnforcement(env: Env, agentId: string, request: Request): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  let body: { mode: string };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse('Invalid JSON body', 400);
+  }
+
+  if (!body.mode || (body.mode !== 'observe' && body.mode !== 'enforce')) {
+    return errorResponse('mode must be "observe" or "enforce"', 400);
+  }
+
+  const { data, error } = await supabaseUpdate(
+    env,
+    'agents',
+    { id: agentId },
+    { aip_enforcement_mode: body.mode }
+  );
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const result = data as unknown[];
+  if (!result || result.length === 0) {
+    return errorResponse('Agent not found', 404);
+  }
+
+  return jsonResponse({
+    agent_id: agentId,
+    enforcement_mode: body.mode,
+    updated: true,
   });
 }
 
@@ -1879,6 +2076,31 @@ export default {
       const aipWebhookDeleteMatch = path.match(/^\/v1\/aip\/webhooks\/([^/]+)$/);
       if (aipWebhookDeleteMatch && method === 'DELETE') {
         return handleDeleteAipWebhook(env, aipWebhookDeleteMatch[1]);
+      }
+
+      // ============================================
+      // CONSCIENCE VALUES & ENFORCEMENT ROUTES (Phase 4)
+      // ============================================
+
+      // GET/PUT/DELETE /v1/agents/:id/conscience-values
+      const conscienceMatch = path.match(/^\/v1\/agents\/([^/]+)\/conscience-values$/);
+      if (conscienceMatch && method === 'GET') {
+        return handleGetConscienceValues(env, conscienceMatch[1]);
+      }
+      if (conscienceMatch && method === 'PUT') {
+        return handlePutConscienceValues(env, conscienceMatch[1], request);
+      }
+      if (conscienceMatch && method === 'DELETE') {
+        return handleDeleteConscienceValues(env, conscienceMatch[1]);
+      }
+
+      // GET/PUT /v1/agents/:id/enforcement
+      const enforcementMatch = path.match(/^\/v1\/agents\/([^/]+)\/enforcement$/);
+      if (enforcementMatch && method === 'GET') {
+        return handleGetEnforcement(env, enforcementMatch[1]);
+      }
+      if (enforcementMatch && method === 'PUT') {
+        return handlePutEnforcement(env, enforcementMatch[1], request);
       }
 
       // 404 for unmatched routes
