@@ -340,37 +340,51 @@ async function fetchAlignmentData(
   enforcementMode: string;
 }> {
   try {
-    const response = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
-      {
-        headers: {
-          apikey: env.SUPABASE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        },
-      }
-    );
-
-    if (!response.ok) {
-      console.warn(`[gateway/aip] Failed to fetch card for ${agentId}: ${response.status}`);
-      return { card: null, conscienceValues: null, enforcementMode: 'observe' };
-    }
-
-    const cards = (await response.json()) as Array<{
-      card_json: Record<string, any>;
-      conscience_values?: ConscienceValue[];
-      enforcement_mode?: string;
-    }>;
-
-    if (cards.length === 0) {
-      return { card: null, conscienceValues: null, enforcementMode: 'observe' };
-    }
-
-    const row = cards[0];
-    return {
-      card: row.card_json || null,
-      conscienceValues: row.conscience_values || null,
-      enforcementMode: row.enforcement_mode || 'observe',
+    const supabaseHeaders = {
+      apikey: env.SUPABASE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_KEY}`,
     };
+
+    // Fetch card + conscience values and enforcement mode in parallel
+    const [cardResponse, agentResponse] = await Promise.all([
+      fetch(
+        `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
+        { headers: supabaseHeaders }
+      ),
+      fetch(
+        `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=aip_enforcement_mode&limit=1`,
+        { headers: supabaseHeaders }
+      ),
+    ]);
+
+    // Parse card data
+    let card: Record<string, any> | null = null;
+    let conscienceValues: ConscienceValue[] | null = null;
+    if (cardResponse.ok) {
+      const cards = (await cardResponse.json()) as Array<{
+        card_json: Record<string, any>;
+        conscience_values?: ConscienceValue[];
+      }>;
+      if (cards.length > 0) {
+        card = cards[0].card_json || null;
+        conscienceValues = cards[0].conscience_values || null;
+      }
+    } else {
+      console.warn(`[gateway/aip] Failed to fetch card for ${agentId}: ${cardResponse.status}`);
+    }
+
+    // Parse enforcement mode from agents table
+    let enforcementMode = 'observe';
+    if (agentResponse.ok) {
+      const agents = (await agentResponse.json()) as Array<{
+        aip_enforcement_mode?: string;
+      }>;
+      if (agents.length > 0) {
+        enforcementMode = agents[0].aip_enforcement_mode || 'observe';
+      }
+    }
+
+    return { card, conscienceValues, enforcementMode };
   } catch (error) {
     console.error(`[gateway/aip] Error fetching alignment data for ${agentId}:`, error);
     return { card: null, conscienceValues: null, enforcementMode: 'observe' };
@@ -798,8 +812,6 @@ export async function handleAnthropicProxy(
     const forwardHeaders = new Headers(request.headers);
     forwardHeaders.set('cf-aig-metadata', metadataHeader);
     forwardHeaders.set('cf-aig-authorization', `Bearer ${env.CF_AIG_TOKEN}`);
-    // Set anthropic-version for extended thinking support
-    forwardHeaders.set('anthropic-version', '2025-04-15');
 
     // Forward the request with potentially modified body
     const forwardRequest = new Request(forwardUrl, {
