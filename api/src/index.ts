@@ -600,8 +600,8 @@ async function handleGetIntegrity(env: Env, agentId: string): Promise<Response> 
     agent_id: agentId,
     total_traces: totalTraces,
     verified_traces: verifiedTraces,
-    violations,
-    score: Math.round(score * 100) / 100,
+    violation_count: violations,
+    integrity_score: Math.floor(score * 10000) / 10000,
   });
 }
 
