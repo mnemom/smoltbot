@@ -274,14 +274,40 @@ async function processLog(
   // Verify trace against alignment card using AAP SDK
   const verification = card ? verifyTrace(trace, card) : null;
 
+  // Check if gateway already created a checkpoint for this session (dedup)
+  let gatewayCheckpointExists = false;
+  try {
+    const dedupRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agent_id}&source=eq.gateway&session_id=eq.${session_id}&order=timestamp.desc&limit=1`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+    if (dedupRes.ok) {
+      const existing = (await dedupRes.json()) as unknown[];
+      gatewayCheckpointExists = existing.length > 0;
+    }
+  } catch (error) {
+    // Fail-open: if dedup query fails, proceed with the check anyway
+    console.warn('[observer/aip] Dedup query failed (proceeding with check):', error);
+  }
+
   // Run AIP integrity check alongside AAP verification (fail-open)
-  const aipSignal = await runIntegrityCheck(
-    bodies.response,
-    log.provider,
-    agent_id,
-    card,
-    env
-  );
+  let aipSignal: IntegritySignal | null = null;
+  if (gatewayCheckpointExists) {
+    console.log('[observer/aip] Gateway checkpoint exists for session, skipping');
+  } else {
+    aipSignal = await runIntegrityCheck(
+      bodies.response,
+      log.provider,
+      agent_id,
+      card,
+      env
+    );
+  }
 
   // Enrich trace metadata with AIP results before submission
   if (aipSignal && trace.context?.metadata) {
@@ -995,6 +1021,7 @@ async function submitCheckpoint(
           window_position: checkpoint.window_position,
           analysis_metadata: checkpoint.analysis_metadata,
           linked_trace_id: checkpoint.linked_trace_id,
+          source: 'observer',
         }),
       }
     );
