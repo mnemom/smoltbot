@@ -319,6 +319,9 @@ async function processLog(
   // Submit trace to Supabase (trace + verification stored separately)
   await submitTrace(trace, verification, log, env);
 
+  // Submit usage event for admin tracking (non-blocking)
+  ctx.waitUntil(submitUsageEvent(trace, log, env));
+
   // Submit AIP checkpoint to Supabase (non-blocking, same pattern as drift)
   // Override agent_id: SDK uses card_id as proxy, but DB FK references agents(id)
   if (aipSignal) {
@@ -896,6 +899,54 @@ async function submitTrace(
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Failed to submit trace: ${response.status} - ${errorText}`);
+  }
+}
+
+/**
+ * Submit a usage event for admin tracking.
+ * Non-blocking, fail-open: errors are logged but never propagate.
+ */
+async function submitUsageEvent(
+  trace: APTrace,
+  log: GatewayLog,
+  env: Env
+): Promise<void> {
+  const eventId = `ue-${crypto.randomUUID().slice(0, 8)}`;
+  const usageEvent = {
+    id: eventId,
+    agent_id: trace.agent_id,
+    session_id: trace.context?.session_id || 'unknown',
+    trace_id: trace.trace_id,
+    timestamp: log.created_at,
+    model: log.model || 'unknown',
+    provider: log.provider || 'anthropic',
+    tokens_in: log.tokens_in || 0,
+    tokens_out: log.tokens_out || 0,
+    duration_ms: log.duration || 0,
+    gateway_log_id: log.id,
+  };
+
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/usage_events`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify(usageEvent),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.warn(`[observer] Failed to submit usage event: ${response.status} - ${errorText}`);
+    }
+  } catch (error) {
+    console.warn('[observer] Error submitting usage event:', error);
   }
 }
 

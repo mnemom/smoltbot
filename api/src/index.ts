@@ -31,6 +31,11 @@
  * - DELETE /v1/agents/:id/conscience-values - Reset conscience values to defaults
  * - GET /v1/agents/:id/enforcement - Get AIP enforcement mode
  * - PUT /v1/agents/:id/enforcement - Update AIP enforcement mode
+ * - GET /v1/admin/stats - Admin dashboard aggregate stats
+ * - GET /v1/admin/usage - Admin usage metrics by day
+ * - GET /v1/admin/users - Admin user listing with agent counts
+ * - GET /v1/admin/agents - Admin agent listing with integrity summaries
+ * - GET /v1/admin/costs - Admin cost breakdown by model
  */
 
 import { detectDrift, verifyTrace, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
@@ -246,6 +251,58 @@ async function supabaseDelete(
   }
 }
 
+// Supabase RPC helper
+async function supabaseRpc(
+  env: Env,
+  functionName: string,
+  params: Record<string, unknown> = {}
+): Promise<{ data: unknown; error: string | null }> {
+  const url = `${env.SUPABASE_URL}/rest/v1/rpc/${functionName}`;
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(params),
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      return { data: null, error: errorText };
+    }
+    const data = await response.json();
+    return { data, error: null };
+  } catch (err) {
+    return { data: null, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+// Supabase Admin API: list users
+async function supabaseAdminListUsers(
+  env: Env,
+  page = 1,
+  perPage = 50
+): Promise<{ users: unknown[]; total: number; error: string | null }> {
+  const url = `${env.SUPABASE_URL}/auth/v1/admin/users?page=${page}&per_page=${perPage}`;
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+      },
+    });
+    if (!response.ok) {
+      return { users: [], total: 0, error: await response.text() };
+    }
+    const data = await response.json() as { users: unknown[]; total: number };
+    return { users: data.users || [], total: data.total || 0, error: null };
+  } catch (err) {
+    return { users: [], total: 0, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
 // SHA-256 hash helper
 async function sha256(message: string): Promise<string> {
   const msgBuffer = new TextEncoder().encode(message);
@@ -259,6 +316,7 @@ interface JWTPayload {
   sub: string;
   email?: string;
   role?: string;
+  app_metadata?: { is_admin?: boolean };
   exp: number;
   iat: number;
 }
@@ -368,6 +426,13 @@ async function getAuthUser(request: Request, env: Env): Promise<JWTPayload | nul
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) return null;
   return verifyJWT(authHeader.slice(7), env);
+}
+
+async function requireAdmin(request: Request, env: Env): Promise<JWTPayload | Response> {
+  const user = await getAuthUser(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+  if (!user.app_metadata?.is_admin) return errorResponse('Admin access required', 403);
+  return user;
 }
 
 // Generate unique ID with prefix
@@ -1837,6 +1902,264 @@ async function handleDeleteConscienceValues(env: Env, agentId: string): Promise<
 }
 
 // ============================================
+// ADMIN ENDPOINTS
+// ============================================
+
+const MODEL_PRICING: Record<string, { input_per_mtok: number; output_per_mtok: number }> = {
+  'claude-sonnet-4-20250514': { input_per_mtok: 3.00, output_per_mtok: 15.00 },
+  'claude-3-5-sonnet-20241022': { input_per_mtok: 3.00, output_per_mtok: 15.00 },
+  'claude-3-5-haiku-20241022': { input_per_mtok: 0.80, output_per_mtok: 4.00 },
+  'claude-3-haiku-20240307': { input_per_mtok: 0.25, output_per_mtok: 1.25 },
+};
+
+function estimateCost(model: string, tokensIn: number, tokensOut: number): number {
+  const pricing = MODEL_PRICING[model] || { input_per_mtok: 3.00, output_per_mtok: 15.00 };
+  return (tokensIn / 1_000_000) * pricing.input_per_mtok + (tokensOut / 1_000_000) * pricing.output_per_mtok;
+}
+
+async function handleAdminStats(env: Env, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  // Aggregate stats from RPC
+  const { data: statsData, error: statsError } = await supabaseRpc(env, 'admin_get_stats');
+
+  // User counts from admin API
+  const { users, total: totalUsers, error: usersError } = await supabaseAdminListUsers(env);
+
+  // Count new users in last 7 days
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const newUsers7d = (users as Array<{ created_at?: string }>).filter(u =>
+    u.created_at && new Date(u.created_at) > sevenDaysAgo
+  ).length;
+
+  // Recent violations (verdict != clear)
+  const violationsUrl = new URL(`${env.SUPABASE_URL}/rest/v1/integrity_checkpoints`);
+  violationsUrl.searchParams.set('verdict', 'neq.clear');
+  violationsUrl.searchParams.set('order', 'timestamp.desc');
+  violationsUrl.searchParams.set('limit', '10');
+  violationsUrl.searchParams.set('select', 'checkpoint_id,agent_id,verdict,timestamp,concerns');
+
+  let recentViolations: unknown[] = [];
+  try {
+    const violationsResponse = await fetch(violationsUrl.toString(), {
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    if (violationsResponse.ok) {
+      recentViolations = await violationsResponse.json() as unknown[];
+    }
+  } catch {
+    // Continue without violations data
+  }
+
+  return jsonResponse({
+    stats: statsData || null,
+    stats_error: statsError || null,
+    total_users: totalUsers,
+    new_users_7d: newUsers7d,
+    users_error: usersError || null,
+    recent_violations: recentViolations,
+  });
+}
+
+async function handleAdminUsage(env: Env, request: Request, url: URL): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const days = parseInt(url.searchParams.get('days') || '30', 10);
+
+  const { data, error } = await supabaseRpc(env, 'admin_usage_by_day', { p_days: days });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  // Add flat cost estimate based on average model pricing
+  const rows = (data as Array<{ total_tokens_in?: number; total_tokens_out?: number }>) || [];
+  const enriched = rows.map(row => ({
+    ...row,
+    cost_estimate_usd: estimateCost(
+      '', // default pricing
+      row.total_tokens_in || 0,
+      row.total_tokens_out || 0
+    ),
+  }));
+
+  return jsonResponse({ period: 'daily', data: enriched });
+}
+
+async function handleAdminUsers(env: Env, request: Request, url: URL): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+  const page = Math.floor(offset / limit) + 1;
+
+  const { users, total, error } = await supabaseAdminListUsers(env, page, limit);
+
+  if (error) {
+    return errorResponse(`Admin API error: ${error}`, 500);
+  }
+
+  // For each user, count their agents
+  const shaped = await Promise.all(
+    (users as Array<{
+      id: string;
+      email?: string;
+      created_at?: string;
+      last_sign_in_at?: string;
+      app_metadata?: { is_admin?: boolean };
+    }>).map(async (user) => {
+      const { data: agentData } = await supabaseQuery(env, 'agents', {
+        select: 'id',
+        filters: { user_id: user.id },
+      });
+      const agentCount = Array.isArray(agentData) ? agentData.length : 0;
+
+      return {
+        id: user.id,
+        email: user.email || null,
+        created_at: user.created_at || null,
+        last_sign_in_at: user.last_sign_in_at || null,
+        agent_count: agentCount,
+        is_admin: user.app_metadata?.is_admin || false,
+      };
+    })
+  );
+
+  return jsonResponse({ users: shaped, total });
+}
+
+async function handleAdminAgents(env: Env, request: Request, url: URL): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 100);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+  // Get per-agent summary from RPC
+  const { data: summaryData } = await supabaseRpc(env, 'admin_agent_summary');
+  const summaryMap: Record<string, Record<string, unknown>> = {};
+  if (Array.isArray(summaryData)) {
+    for (const row of summaryData as Array<{ agent_id: string; [key: string]: unknown }>) {
+      summaryMap[row.agent_id] = row;
+    }
+  }
+
+  // Get paginated agents
+  const { data: agentsData, error: agentsError } = await supabaseQuery(env, 'agents', {
+    order: { column: 'created_at', ascending: false },
+    limit,
+    offset,
+  });
+
+  if (agentsError) {
+    return errorResponse(`Database error: ${agentsError}`, 500);
+  }
+
+  const agents = (agentsData as Array<Record<string, unknown>>) || [];
+
+  // Join summary data and compute integrity_ratio
+  const enriched = agents.map(agent => {
+    const summary = summaryMap[agent.id as string] || {};
+    const checkpointCount = (summary.checkpoint_count as number) || 0;
+    const clearCount = (summary.clear_count as number) || 0;
+    const integrityRatio = checkpointCount > 0
+      ? Math.round((clearCount / checkpointCount) * 1000) / 1000
+      : 0;
+
+    return {
+      ...agent,
+      trace_count: summary.trace_count || 0,
+      checkpoint_count: checkpointCount,
+      clear_count: clearCount,
+      integrity_ratio: integrityRatio,
+    };
+  });
+
+  // Get total agent count
+  const countUrl = new URL(`${env.SUPABASE_URL}/rest/v1/agents`);
+  countUrl.searchParams.set('select', 'id');
+  let total = agents.length;
+  try {
+    const countResponse = await fetch(countUrl.toString(), {
+      method: 'HEAD',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+        'Prefer': 'count=exact',
+      },
+    });
+    const contentRange = countResponse.headers.get('content-range');
+    if (contentRange) {
+      const parts = contentRange.split('/');
+      if (parts[1] && parts[1] !== '*') {
+        total = parseInt(parts[1], 10);
+      }
+    }
+  } catch {
+    // Use fallback count
+  }
+
+  return jsonResponse({ agents: enriched, total });
+}
+
+async function handleAdminCosts(env: Env, request: Request, url: URL): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const days = parseInt(url.searchParams.get('days') || '30', 10);
+
+  const { data, error } = await supabaseRpc(env, 'admin_usage_by_model', { p_days: days });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const rows = (data as Array<{
+    model?: string;
+    total_tokens_in?: number;
+    total_tokens_out?: number;
+    [key: string]: unknown;
+  }>) || [];
+
+  // Calculate cost per row and totals
+  let totalCostUsd = 0;
+  let totalTokensIn = 0;
+  let totalTokensOut = 0;
+
+  const enriched = rows.map(row => {
+    const tokensIn = row.total_tokens_in || 0;
+    const tokensOut = row.total_tokens_out || 0;
+    const costUsd = estimateCost(row.model || '', tokensIn, tokensOut);
+
+    totalCostUsd += costUsd;
+    totalTokensIn += tokensIn;
+    totalTokensOut += tokensOut;
+
+    return {
+      ...row,
+      cost_usd: Math.round(costUsd * 1_000_000) / 1_000_000,
+    };
+  });
+
+  return jsonResponse({
+    period: 'daily',
+    data: enriched,
+    totals: {
+      total_cost_usd: Math.round(totalCostUsd * 1_000_000) / 1_000_000,
+      total_tokens_in: totalTokensIn,
+      total_tokens_out: totalTokensOut,
+    },
+  });
+}
+
+// ============================================
 // ENFORCEMENT MODE ENDPOINTS (Phase 4)
 // ============================================
 
@@ -2101,6 +2424,30 @@ export default {
       }
       if (enforcementMatch && method === 'PUT') {
         return handlePutEnforcement(env, enforcementMatch[1], request);
+      }
+
+      // ============================================
+      // ADMIN ROUTES
+      // ============================================
+
+      if (path === '/v1/admin/stats' && method === 'GET') {
+        return handleAdminStats(env, request);
+      }
+
+      if (path === '/v1/admin/usage' && method === 'GET') {
+        return handleAdminUsage(env, request, url);
+      }
+
+      if (path === '/v1/admin/users' && method === 'GET') {
+        return handleAdminUsers(env, request, url);
+      }
+
+      if (path === '/v1/admin/agents' && method === 'GET') {
+        return handleAdminAgents(env, request, url);
+      }
+
+      if (path === '/v1/admin/costs' && method === 'GET') {
+        return handleAdminCosts(env, request, url);
       }
 
       // 404 for unmatched routes
