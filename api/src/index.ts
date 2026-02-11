@@ -1956,12 +1956,19 @@ async function handleAdminStats(env: Env, request: Request): Promise<Response> {
     // Continue without violations data
   }
 
+  // Flatten RPC stats + user counts into the shape the frontend expects
+  const rpc = (statsData || {}) as Record<string, number>;
+
   return jsonResponse({
-    stats: statsData || null,
-    stats_error: statsError || null,
-    total_users: totalUsers,
+    total_users: totalUsers || users.length,
+    total_agents: rpc.total_agents ?? 0,
+    total_traces: rpc.total_traces ?? 0,
+    total_checkpoints: rpc.total_checkpoints ?? 0,
+    active_agents_24h: rpc.active_agents_24h ?? 0,
+    total_usage_events: rpc.total_usage_events ?? 0,
+    total_tokens_in: rpc.total_tokens_in ?? 0,
+    total_tokens_out: rpc.total_tokens_out ?? 0,
     new_users_7d: newUsers7d,
-    users_error: usersError || null,
     recent_violations: recentViolations,
   });
 }
@@ -1979,13 +1986,13 @@ async function handleAdminUsage(env: Env, request: Request, url: URL): Promise<R
   }
 
   // Add flat cost estimate based on average model pricing
-  const rows = (data as Array<{ total_tokens_in?: number; total_tokens_out?: number }>) || [];
+  const rows = (data as Array<{ tokens_in?: number; tokens_out?: number }>) || [];
   const enriched = rows.map(row => ({
     ...row,
     cost_estimate_usd: estimateCost(
       '', // default pricing
-      row.total_tokens_in || 0,
-      row.total_tokens_out || 0
+      row.tokens_in || 0,
+      row.tokens_out || 0
     ),
   }));
 
@@ -2123,8 +2130,8 @@ async function handleAdminCosts(env: Env, request: Request, url: URL): Promise<R
 
   const rows = (data as Array<{
     model?: string;
-    total_tokens_in?: number;
-    total_tokens_out?: number;
+    tokens_in?: number;
+    tokens_out?: number;
     [key: string]: unknown;
   }>) || [];
 
@@ -2134,8 +2141,8 @@ async function handleAdminCosts(env: Env, request: Request, url: URL): Promise<R
   let totalTokensOut = 0;
 
   const enriched = rows.map(row => {
-    const tokensIn = row.total_tokens_in || 0;
-    const tokensOut = row.total_tokens_out || 0;
+    const tokensIn = row.tokens_in || 0;
+    const tokensOut = row.tokens_out || 0;
     const costUsd = estimateCost(row.model || '', tokensIn, tokensOut);
 
     totalCostUsd += costUsd;
