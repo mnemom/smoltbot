@@ -1,0 +1,11 @@
+name = "smoltbot-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+workers_dev = true
+
+[vars]
+ALLOWED_TARGETS = "rentahuman.ai"
+
+# Secrets (set via wrangler secret put):
+# PROXY_TOKEN - shared secret for auth
