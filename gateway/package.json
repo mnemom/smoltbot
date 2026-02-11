@@ -8,7 +8,7 @@
     "test": "vitest"
   },
   "dependencies": {
-    "@mnemom/agent-integrity-protocol": "file:../../aip/packages/typescript"
+    "@mnemom/agent-integrity-protocol": "^0.1.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
