@@ -2759,6 +2759,170 @@ async function handlePutEnforcement(env: Env, agentId: string, request: Request)
   });
 }
 
+async function handleResolve(env: Env, agentId: string, request: Request): Promise<Response> {
+  // Require authentication
+  const user = await getAuthUser(request, env);
+  if (!user) {
+    return errorResponse('Authentication required', 401);
+  }
+
+  // Parse and validate request body
+  const body = await request.json() as {
+    target_type?: string;
+    target_id?: string;
+    resolution_type?: string;
+    action_name?: string;
+    value_name?: string;
+  };
+
+  if (!body.target_type || !['checkpoint', 'trace'].includes(body.target_type)) {
+    return errorResponse('target_type is required and must be "checkpoint" or "trace"', 400);
+  }
+  if (!body.target_id) {
+    return errorResponse('target_id is required', 400);
+  }
+  if (!body.resolution_type || !['acknowledged', 'allow_action', 'add_value'].includes(body.resolution_type)) {
+    return errorResponse('resolution_type is required and must be "acknowledged", "allow_action", or "add_value"', 400);
+  }
+  if (body.resolution_type === 'allow_action' && !body.action_name) {
+    return errorResponse('action_name is required when resolution_type is "allow_action"', 400);
+  }
+  if (body.resolution_type === 'add_value' && !body.value_name) {
+    return errorResponse('value_name is required when resolution_type is "add_value"', 400);
+  }
+
+  const resolution = {
+    id: generateId('res'),
+    agent_id: agentId,
+    target_type: body.target_type,
+    target_id: body.target_id,
+    resolution_type: body.resolution_type,
+    resolved_by: user.email,
+    resolved_at: new Date().toISOString(),
+    metadata: {} as Record<string, unknown>,
+  };
+
+  const headers = {
+    'apikey': env.SUPABASE_KEY,
+    'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+  };
+
+  // For allow_action: update alignment card's bounded_actions
+  if (body.resolution_type === 'allow_action') {
+    const { data: cardData, error: cardError } = await supabaseQuery(env, 'alignment_cards', {
+      filters: { agent_id: agentId, is_active: true },
+      single: true,
+    });
+
+    if (cardError) {
+      if (cardError.includes('PGRST116') || cardError.includes('0 rows')) {
+        return errorResponse('Alignment card not found for agent', 404);
+      }
+      return errorResponse(`Database error: ${cardError}`, 500);
+    }
+
+    const cardRecord = cardData as { card_json: Record<string, any>; id: string };
+    const cardJson = cardRecord.card_json;
+    const cardId = cardRecord.id || cardJson.card_id || `ac-${agentId.replace('smolt-', '')}`;
+
+    const currentBounded: string[] = cardJson.autonomy_envelope?.bounded_actions || [];
+    resolution.metadata.original_bounded_actions = [...currentBounded];
+
+    if (!currentBounded.includes(body.action_name!)) {
+      currentBounded.push(body.action_name!);
+      if (!cardJson.autonomy_envelope) {
+        cardJson.autonomy_envelope = {};
+      }
+      cardJson.autonomy_envelope.bounded_actions = currentBounded;
+
+      const patchResponse = await fetch(
+        `${env.SUPABASE_URL}/rest/v1/alignment_cards?id=eq.${cardId}`,
+        {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ card_json: cardJson, issued_at: new Date().toISOString() }),
+        }
+      );
+
+      if (!patchResponse.ok) {
+        return errorResponse(`Failed to update alignment card: ${patchResponse.status}`, 500);
+      }
+    }
+  }
+
+  // For add_value: update alignment card's declared values
+  if (body.resolution_type === 'add_value') {
+    const { data: cardData, error: cardError } = await supabaseQuery(env, 'alignment_cards', {
+      filters: { agent_id: agentId, is_active: true },
+      single: true,
+    });
+
+    if (cardError) {
+      if (cardError.includes('PGRST116') || cardError.includes('0 rows')) {
+        return errorResponse('Alignment card not found for agent', 404);
+      }
+      return errorResponse(`Database error: ${cardError}`, 500);
+    }
+
+    const cardRecord = cardData as { card_json: Record<string, any>; id: string };
+    const cardJson = cardRecord.card_json;
+    const cardId = cardRecord.id || cardJson.card_id || `ac-${agentId.replace('smolt-', '')}`;
+
+    const currentDeclared: string[] = cardJson.values?.declared || [];
+    resolution.metadata.original_declared_values = [...currentDeclared];
+
+    if (!currentDeclared.includes(body.value_name!)) {
+      currentDeclared.push(body.value_name!);
+      if (!cardJson.values) {
+        cardJson.values = {};
+      }
+      cardJson.values.declared = currentDeclared;
+
+      const patchResponse = await fetch(
+        `${env.SUPABASE_URL}/rest/v1/alignment_cards?id=eq.${cardId}`,
+        {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify({ card_json: cardJson, issued_at: new Date().toISOString() }),
+        }
+      );
+
+      if (!patchResponse.ok) {
+        return errorResponse(`Failed to update alignment card: ${patchResponse.status}`, 500);
+      }
+    }
+  }
+
+  // Insert the resolution record
+  const insertResponse = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/resolutions`,
+    {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Prefer': 'return=representation',
+      },
+      body: JSON.stringify(resolution),
+    }
+  );
+
+  if (!insertResponse.ok) {
+    const errorText = await insertResponse.text();
+    if (errorText.includes('duplicate') || errorText.includes('unique') || errorText.includes('23505')) {
+      return errorResponse('Resolution already exists for this agent, target type, and target ID', 409);
+    }
+    return errorResponse(`Failed to insert resolution: ${errorText}`, 500);
+  }
+
+  return jsonResponse({
+    resolution_id: resolution.id,
+    resolution_type: body.resolution_type,
+    resolved_by: user.email,
+    card_modified: body.resolution_type !== 'acknowledged',
+  });
+}
+
 // Main request handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -2942,6 +3106,12 @@ export default {
       const aipWebhookDeleteMatch = path.match(/^\/v1\/aip\/webhooks\/([^/]+)$/);
       if (aipWebhookDeleteMatch && method === 'DELETE') {
         return handleDeleteAipWebhook(env, aipWebhookDeleteMatch[1]);
+      }
+
+      // POST /v1/agents/:id/resolve - Resolve a concern/violation
+      const resolveMatch = path.match(/^\/v1\/agents\/([^/]+)\/resolve$/);
+      if (resolveMatch && method === 'POST') {
+        return handleResolve(env, resolveMatch[1], request);
       }
 
       // ============================================
