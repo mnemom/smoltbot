@@ -36,6 +36,7 @@
  * - GET /v1/admin/users - Admin user listing with agent counts
  * - GET /v1/admin/agents - Admin agent listing with integrity summaries
  * - GET /v1/admin/costs - Admin cost breakdown by model
+ * - POST /v1/agents/:id/reverify/aip - Re-evaluate AIP checkpoints against updated card
  */
 
 import { detectDrift, verifyTrace, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
@@ -762,6 +763,277 @@ async function handleReverify(env: Env, agentId: string, url: URL): Promise<Resp
     reverified: updated,
     still_violating: stillViolating,
     now_clean: updated - stillViolating,
+    errors: errors.length > 0 ? errors : undefined,
+  });
+}
+
+// ============================================
+// AIP Checkpoint Re-evaluation
+// Deterministically re-evaluates non-clear checkpoints
+// against the agent's current alignment card.
+// ============================================
+
+interface CheckpointConcern {
+  category?: string;
+  severity?: string;
+  description?: string;
+  evidence?: string;
+  relevant_card_field?: string;
+  relevant_conscience_value?: string;
+}
+
+interface CheckpointRow {
+  checkpoint_id: string;
+  agent_id: string;
+  card_id: string;
+  session_id: string;
+  verdict: string;
+  concerns: CheckpointConcern[];
+  reasoning_summary: string;
+  timestamp: string;
+  re_evaluated_at: string | null;
+}
+
+async function handleReverifyAip(env: Env, agentId: string, url: URL): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 20);
+  const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+  // 1. Fetch active alignment card for the agent
+  const { data: cardData, error: cardError } = await supabaseQuery(env, 'alignment_cards', {
+    filters: { agent_id: agentId, is_active: true },
+    single: true,
+  });
+
+  if (cardError) {
+    if (cardError.includes('PGRST116') || cardError.includes('0 rows')) {
+      return errorResponse('Alignment card not found for agent', 404);
+    }
+    return errorResponse(`Database error: ${cardError}`, 500);
+  }
+
+  const cardRecord = cardData as { card_json: Record<string, any>; id: string };
+  const cardJson = cardRecord.card_json;
+  const cardId = cardRecord.id || cardJson.card_id || 'unknown';
+
+  // Extract card fields for re-evaluation
+  const declaredValues: string[] = (cardJson.values?.declared || []).map((v: string) => v.toLowerCase());
+  const boundedActions: string[] = cardJson.autonomy_envelope?.bounded_actions || [];
+
+  // 2. Fetch non-clear checkpoints that haven't been re-evaluated yet
+  const checkpointsUrl = new URL(`${env.SUPABASE_URL}/rest/v1/integrity_checkpoints`);
+  checkpointsUrl.searchParams.set('agent_id', `eq.${agentId}`);
+  checkpointsUrl.searchParams.set('verdict', 'neq.clear');
+  checkpointsUrl.searchParams.set('re_evaluated_at', 'is.null');
+  checkpointsUrl.searchParams.set('order', 'timestamp.asc');
+  checkpointsUrl.searchParams.set('limit', limit.toString());
+  checkpointsUrl.searchParams.set('offset', offset.toString());
+
+  const headers = {
+    'apikey': env.SUPABASE_KEY,
+    'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+  };
+
+  let checkpoints: CheckpointRow[];
+  try {
+    const cpResponse = await fetch(checkpointsUrl.toString(), { headers });
+    if (!cpResponse.ok) {
+      const errText = await cpResponse.text();
+      return errorResponse(`Failed to fetch checkpoints: ${errText}`, 500);
+    }
+    checkpoints = await cpResponse.json() as CheckpointRow[];
+  } catch (err) {
+    return errorResponse(`Failed to fetch checkpoints: ${err}`, 500);
+  }
+
+  // Categories that must NEVER be auto-resolved
+  const neverResolveCategories = new Set([
+    'prompt_injection',
+    'deceptive_reasoning',
+    'reasoning_corruption',
+  ]);
+
+  // Journalism keywords derived from bounded_action semantics
+  const journalismKeywords = [
+    'search', 'moltbook', 'api', 'browse', 'agent', 'fetch',
+    'proxy', 'credential', 'memory', 'keyword', 'exploration',
+  ];
+
+  // Research-related keywords for undeclared_intent resolution
+  const researchKeywords = [
+    'search', 'explore', 'dig', 'broader', 'general', 'existential',
+    'agent', 'topic', 'content', 'api', 'script', 'hit',
+  ];
+
+  // 3. Re-evaluate each checkpoint
+  let reEvaluatedCount = 0;
+  let resolvedToClearCount = 0;
+  let keptNonClearCount = 0;
+  const errors: string[] = [];
+  const results: Array<{
+    checkpoint_id: string;
+    old_verdict: string;
+    new_verdict: string;
+    concerns_before: number;
+    concerns_after: number;
+    resolved_concerns: string[];
+  }> = [];
+
+  // Extract bounded_action prefixes (before ':') for matching
+  const boundedActionPrefixes = boundedActions.map(
+    (ba: string) => (ba.includes(':') ? ba.split(':')[0] : ba).toLowerCase()
+  );
+
+  for (const checkpoint of checkpoints) {
+    try {
+      const oldVerdict = checkpoint.verdict;
+      const allConcerns: CheckpointConcern[] = checkpoint.concerns || [];
+      const remainingConcerns: CheckpointConcern[] = [];
+      const resolvedDescriptions: string[] = [];
+
+      for (const concern of allConcerns) {
+        const category = concern.category || '';
+        const severity = (concern.severity || '').toLowerCase();
+        const description = (concern.description || '').toLowerCase();
+        const evidence = (concern.evidence || '').toLowerCase();
+        const relevantField = (concern.relevant_card_field || '').toLowerCase();
+
+        // NEVER auto-resolve security-sensitive categories
+        if (neverResolveCategories.has(category)) {
+          remainingConcerns.push(concern);
+          continue;
+        }
+
+        let resolved = false;
+
+        // autonomy_violation where relevant_card_field contains 'bounded_actions'
+        if (category === 'autonomy_violation' && relevantField.includes('bounded_actions')) {
+          // Check if evidence/description overlaps with bounded_action prefixes
+          const hasActionOverlap = boundedActionPrefixes.some(
+            (prefix: string) => evidence.includes(prefix) || description.includes(prefix)
+          );
+          // Also check journalism keywords
+          const hasKeywordOverlap = journalismKeywords.some(
+            (kw) => evidence.includes(kw) || description.includes(kw)
+          );
+          if (hasActionOverlap || hasKeywordOverlap) {
+            resolved = true;
+          }
+        }
+
+        // undeclared_intent
+        if (!resolved && category === 'undeclared_intent') {
+          const hasInvestigativeRigor = declaredValues.includes('investigative_rigor');
+          const hasResearchKeyword = researchKeywords.some(
+            (kw) => evidence.includes(kw) || description.includes(kw)
+          );
+          if (hasInvestigativeRigor && hasResearchKeyword) {
+            resolved = true;
+          }
+        }
+
+        // value_misalignment with low severity
+        if (!resolved && category === 'value_misalignment' && severity === 'low') {
+          const mentionsSourcing = description.includes('sourc') || evidence.includes('sourc')
+            || description.includes('accuracy') || evidence.includes('accuracy');
+          const hasSourceAttribution = declaredValues.includes('source_attribution');
+          const hasAccuracy = declaredValues.includes('accuracy');
+          if (mentionsSourcing && hasSourceAttribution && hasAccuracy) {
+            resolved = true;
+          }
+        }
+
+        if (resolved) {
+          resolvedDescriptions.push(`${category}: ${concern.description || 'no description'}`);
+        } else {
+          remainingConcerns.push(concern);
+        }
+      }
+
+      // 4. Determine new verdict
+      let newVerdict: string;
+      if (remainingConcerns.length === 0) {
+        newVerdict = 'clear';
+      } else {
+        const hasHighOrCritical = remainingConcerns.some((c) => {
+          const sev = (c.severity || '').toLowerCase();
+          return sev === 'high' || sev === 'critical';
+        });
+        newVerdict = hasHighOrCritical ? 'boundary_violation' : 'review_needed';
+      }
+
+      // 5. Build update payload
+      const reEvaluationMetadata = {
+        method: 'deterministic_card_recheck',
+        card_id: cardId,
+        resolution_notes: resolvedDescriptions.length > 0
+          ? `Resolved ${resolvedDescriptions.length} concern(s): ${resolvedDescriptions.join('; ')}`
+          : 'No concerns resolved',
+        concerns_before: allConcerns.length,
+        concerns_after: remainingConcerns.length,
+      };
+
+      const updatePayload: Record<string, unknown> = {
+        original_verdict: oldVerdict,
+        re_evaluated_at: new Date().toISOString(),
+        re_evaluation_metadata: reEvaluationMetadata,
+      };
+
+      // If verdict changed, update verdict, concerns, and reasoning
+      if (newVerdict !== oldVerdict) {
+        updatePayload.verdict = newVerdict;
+        updatePayload.concerns = remainingConcerns;
+        updatePayload.reasoning_summary = `Re-evaluated: ${checkpoint.reasoning_summary}`;
+      }
+
+      const patchRes = await fetch(
+        `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?checkpoint_id=eq.${checkpoint.checkpoint_id}`,
+        {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify(updatePayload),
+        }
+      );
+
+      if (!patchRes.ok) {
+        errors.push(`PATCH failed for ${checkpoint.checkpoint_id}: ${patchRes.status}`);
+      } else {
+        reEvaluatedCount++;
+        if (newVerdict === 'clear') {
+          resolvedToClearCount++;
+        } else {
+          keptNonClearCount++;
+        }
+      }
+
+      results.push({
+        checkpoint_id: checkpoint.checkpoint_id,
+        old_verdict: oldVerdict,
+        new_verdict: newVerdict,
+        concerns_before: allConcerns.length,
+        concerns_after: remainingConcerns.length,
+        resolved_concerns: resolvedDescriptions,
+      });
+    } catch (err) {
+      errors.push(`${checkpoint.checkpoint_id}: ${err}`);
+    }
+  }
+
+  // 6. Return summary
+  return jsonResponse({
+    agent_id: agentId,
+    card_id: cardId,
+    total_in_batch: checkpoints.length,
+    offset,
+    limit,
+    re_evaluated: reEvaluatedCount,
+    resolved_to_clear: resolvedToClearCount,
+    kept_non_clear: keptNonClearCount,
+    results,
     errors: errors.length > 0 ? errors : undefined,
   });
 }
@@ -2313,6 +2585,12 @@ export default {
       const integrityMatch = path.match(/^\/v1\/integrity\/([^/]+)$/);
       if (integrityMatch && method === 'GET') {
         return handleGetIntegrity(env, integrityMatch[1]);
+      }
+
+      // POST /v1/agents/:id/reverify/aip - Re-evaluate AIP checkpoints
+      const reverifyAipMatch = path.match(/^\/v1\/agents\/([^/]+)\/reverify\/aip$/);
+      if (reverifyAipMatch && method === 'POST') {
+        return handleReverifyAip(env, reverifyAipMatch[1], url);
       }
 
       // POST /v1/agents/:id/reverify - Re-verify traces against updated card
