@@ -255,6 +255,11 @@ async function processLog(
   // Fetch full request + response bodies
   const bodies = await fetchLogBodies(log.id, env);
 
+  // CF AI Gateway stores streamed responses with content flattened to a string
+  // and raw SSE events in streamed_data[]. Reconstruct SSE format so the AIP
+  // SDK's extractThinkingFromStream() can find thinking blocks.
+  bodies.response = reconstructResponseForAIP(bodies.response);
+
   // Extract thinking, tool calls, user query, response text
   const context = extractContext(bodies.request, bodies.response);
 
@@ -470,6 +475,51 @@ async function deleteLog(logId: string, env: Env): Promise<void> {
   } catch (error) {
     console.warn(`[observer] Error deleting log ${logId}:`, error);
   }
+}
+
+// ============================================================================
+// CF AI Gateway Response Reconstruction
+// ============================================================================
+
+/**
+ * CF AI Gateway stores streamed responses with:
+ *   - content: flattened text string (thinking blocks stripped)
+ *   - streamed_data: array of raw SSE event objects (thinking preserved)
+ *
+ * The AIP SDK needs either:
+ *   - Non-streaming JSON with content as array of blocks, OR
+ *   - SSE text with "data: " prefixed lines
+ *
+ * This function detects the CF gateway format and reconstructs SSE text
+ * from streamed_data so extractThinkingFromStream() can parse it.
+ */
+function reconstructResponseForAIP(responseBody: string): string {
+  if (!responseBody) return responseBody;
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(responseBody);
+  } catch {
+    return responseBody; // Not JSON, return as-is (might be raw SSE)
+  }
+
+  // If content is already an array, the SDK can handle it directly
+  if (Array.isArray(parsed.content)) {
+    return responseBody;
+  }
+
+  // If streamed_data exists, reconstruct SSE format
+  const streamedData = parsed.streamed_data;
+  if (!Array.isArray(streamedData) || streamedData.length === 0) {
+    return responseBody;
+  }
+
+  // Convert each streamed_data object to an SSE "data: " line
+  const sseLines = streamedData.map(
+    (chunk: unknown) => `data: ${JSON.stringify(chunk)}`
+  );
+
+  return sseLines.join('\n');
 }
 
 // ============================================================================
