@@ -115,6 +115,9 @@ export default {
       console.log(
         `[observer] Completed - processed: ${stats.processed}, skipped: ${stats.skipped}, errors: ${stats.errors}`
       );
+
+      // Expire stale nudges (>4h old pending nudges)
+      ctx.waitUntil(expireStaleNudges(env));
     } catch (error) {
       console.error('[observer] Fatal error in scheduled handler:', error);
     }
@@ -305,6 +308,7 @@ async function processLog(
   if (gatewayCheckpointExists) {
     console.log('[observer/aip] Gateway checkpoint exists for session, skipping');
   } else {
+    console.log(`[observer/aip] Running integrity check for ${agent_id}, provider=${log.provider}, responseLen=${bodies.response.length}, hasCard=${!!card}`);
     aipSignal = await runIntegrityCheck(
       bodies.response,
       log.provider,
@@ -312,6 +316,7 @@ async function processLog(
       card,
       env
     );
+    console.log(`[observer/aip] runIntegrityCheck returned: ${aipSignal ? `verdict=${aipSignal.checkpoint.verdict}` : 'null'}`);
   }
 
   // Enrich trace metadata with AIP results before submission
@@ -334,6 +339,11 @@ async function processLog(
     aipSignal.checkpoint.agent_id = agent_id;
     aipSignal.checkpoint.linked_trace_id = trace.trace_id;
     ctx.waitUntil(submitCheckpoint(aipSignal.checkpoint, env));
+
+    // Create pending nudge for boundary violations (if enforcement mode is nudge/enforce)
+    if (aipSignal.checkpoint.verdict === 'boundary_violation') {
+      ctx.waitUntil(createNudgeIfEnabled(aipSignal.checkpoint, agent_id, session_id, env));
+    }
   }
 
   // Check for behavioral drift (runs in background)
@@ -1333,6 +1343,124 @@ function buildTrace(
   };
 
   return trace;
+}
+
+// ============================================================================
+// Enforcement Nudge Functions
+// ============================================================================
+
+/**
+ * Check enforcement mode and create a pending nudge if enabled.
+ * Fetches enforcement mode from agents table, then creates nudge record.
+ */
+async function createNudgeIfEnabled(
+  checkpoint: IntegrityCheckpoint,
+  agentId: string,
+  sessionId: string,
+  env: Env
+): Promise<void> {
+  try {
+    // Fetch enforcement mode
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=aip_enforcement_mode&limit=1`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`[observer/nudge] Failed to fetch enforcement mode: ${response.status}`);
+      return;
+    }
+
+    const agents = (await response.json()) as Array<{ aip_enforcement_mode?: string }>;
+    const mode = agents[0]?.aip_enforcement_mode || 'observe';
+
+    if (mode !== 'nudge' && mode !== 'enforce') return;
+
+    // Build nudge content
+    const nudgeId = `nudge-${randomHex(8)}`;
+    const concerns = checkpoint.concerns || [];
+    const concernsSummary = concerns.length > 0
+      ? concerns.map((c: any) => `${c.category || 'unknown'}: ${c.description || 'unspecified'}`).join('; ')
+      : 'Boundary violation detected';
+
+    const nudgeContent = `[INTEGRITY NOTICE — Conscience Protocol]\n` +
+      `Your previous response (checkpoint ${checkpoint.checkpoint_id}) was flagged as a boundary violation.\n` +
+      `Concern: ${concernsSummary}\n` +
+      `Review your approach and self-correct. This notice is visible in your transparency timeline.`;
+
+    const createResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/enforcement_nudges`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({
+          id: nudgeId,
+          agent_id: agentId,
+          checkpoint_id: checkpoint.checkpoint_id,
+          session_id: sessionId,
+          status: 'pending',
+          nudge_content: nudgeContent,
+          concerns_summary: concernsSummary,
+        }),
+      }
+    );
+
+    if (!createResponse.ok) {
+      const errorText = await createResponse.text();
+      console.warn(`[observer/nudge] Failed to create nudge: ${createResponse.status} - ${errorText}`);
+    } else {
+      console.log(`[observer/nudge] Created pending nudge ${nudgeId} for checkpoint ${checkpoint.checkpoint_id}`);
+    }
+  } catch (error) {
+    console.error('[observer/nudge] Error creating nudge:', error);
+  }
+}
+
+/**
+ * Expire stale pending nudges older than 4 hours.
+ * Called during cron cycles.
+ */
+async function expireStaleNudges(env: Env): Promise<void> {
+  try {
+    const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/enforcement_nudges?status=eq.pending&created_at=lt.${fourHoursAgo}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+        body: JSON.stringify({
+          status: 'expired',
+          expired_at: new Date().toISOString(),
+        }),
+      }
+    );
+
+    if (response.ok) {
+      const expired = (await response.json()) as unknown[];
+      if (expired.length > 0) {
+        console.log(`[observer/nudge] Expired ${expired.length} stale nudge(s)`);
+      }
+    } else {
+      console.warn(`[observer/nudge] Failed to expire stale nudges: ${response.status}`);
+    }
+  } catch (error) {
+    console.error('[observer/nudge] Error expiring nudges:', error);
+  }
 }
 
 // ============================================================================

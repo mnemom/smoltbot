@@ -53,6 +53,7 @@ interface Agent {
   claimed_at: string | null;
   claimed_by: string | null;
   email: string | null;
+  aip_enforcement_mode?: string;
 }
 
 interface AlignmentCard {
@@ -478,6 +479,190 @@ async function storeCheckpoint(
   }
 }
 
+// ============================================================================
+// Wave 3: Conscience Nudge Functions
+// ============================================================================
+
+/**
+ * Build the text injected into the system prompt when delivering a nudge.
+ * IMPORTANT: No PII, no specific data — generic concern categories only.
+ */
+function buildNudgeText(
+  nudges: Array<{ id: string; checkpoint_id: string; concerns_summary: string }>
+): string {
+  const header = '[INTEGRITY NOTICE — Conscience Protocol]';
+  const lines = nudges.map(
+    (n) =>
+      `Your previous response (checkpoint ${n.checkpoint_id}) was flagged as a boundary violation.\nConcern: ${n.concerns_summary}\nReview your approach and self-correct. This notice is visible in your transparency timeline.`
+  );
+  return `${header}\n${lines.join('\n\n')}`;
+}
+
+/**
+ * Inject nudge text into the request body's system parameter.
+ * Handles string, array-of-content-blocks, or absent system field.
+ */
+function injectNudgeIntoSystem(
+  requestBody: Record<string, any>,
+  nudgeText: string
+): void {
+  const existing = requestBody.system;
+  if (!existing) {
+    requestBody.system = nudgeText;
+  } else if (typeof existing === 'string') {
+    requestBody.system = `${existing}\n\n${nudgeText}`;
+  } else if (Array.isArray(existing)) {
+    existing.push({ type: 'text', text: nudgeText });
+  }
+}
+
+/**
+ * Query pending nudges for an agent and inject them into the request body.
+ * Returns the IDs of injected nudges (for later marking as delivered).
+ * Fail-open: errors logged, request proceeds unmodified.
+ */
+async function injectPendingNudges(
+  requestBody: Record<string, any>,
+  agentId: string,
+  enforcementMode: string,
+  env: Env
+): Promise<string[]> {
+  if (enforcementMode !== 'nudge' && enforcementMode !== 'enforce') {
+    return [];
+  }
+
+  try {
+    const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/enforcement_nudges?agent_id=eq.${agentId}&status=eq.pending&created_at=gte.${fourHoursAgo}&order=created_at.asc&limit=5`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`[gateway/nudge] Failed to fetch pending nudges: ${response.status}`);
+      return [];
+    }
+
+    const nudges = (await response.json()) as Array<{
+      id: string;
+      checkpoint_id: string;
+      concerns_summary: string;
+    }>;
+
+    if (nudges.length === 0) return [];
+
+    const nudgeText = buildNudgeText(nudges);
+    injectNudgeIntoSystem(requestBody, nudgeText);
+    console.log(`[gateway/nudge] Injected ${nudges.length} nudge(s) for ${agentId}`);
+
+    return nudges.map((n) => n.id);
+  } catch (error) {
+    console.error('[gateway/nudge] Error injecting nudges (fail-open):', error);
+    return [];
+  }
+}
+
+/**
+ * Create a pending nudge record for a boundary violation.
+ * Called when enforcement mode is 'nudge' or 'enforce'.
+ */
+async function createPendingNudge(
+  checkpoint: IntegrityCheckpoint,
+  agentId: string,
+  sessionId: string,
+  env: Env
+): Promise<void> {
+  try {
+    const nudgeId = `nudge-${randomHex(8)}`;
+    const concerns = checkpoint.concerns || [];
+    const concernsSummary = concerns.length > 0
+      ? concerns.map((c: any) => `${c.category || 'unknown'}: ${c.description || 'unspecified'}`).join('; ')
+      : 'Boundary violation detected';
+    const nudgeContent = buildNudgeText([{
+      id: nudgeId,
+      checkpoint_id: checkpoint.checkpoint_id,
+      concerns_summary: concernsSummary,
+    }]);
+
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/enforcement_nudges`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({
+          id: nudgeId,
+          agent_id: agentId,
+          checkpoint_id: checkpoint.checkpoint_id,
+          session_id: sessionId,
+          status: 'pending',
+          nudge_content: nudgeContent,
+          concerns_summary: concernsSummary,
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.warn(`[gateway/nudge] Failed to create nudge: ${response.status} - ${errorText}`);
+    } else {
+      console.log(`[gateway/nudge] Created pending nudge ${nudgeId} for checkpoint ${checkpoint.checkpoint_id}`);
+    }
+  } catch (error) {
+    console.error('[gateway/nudge] Error creating nudge:', error);
+  }
+}
+
+/**
+ * Mark nudges as delivered after successful injection.
+ * Called via ctx.waitUntil() after the forward completes.
+ */
+async function markNudgesDelivered(
+  nudgeIds: string[],
+  sessionId: string,
+  env: Env
+): Promise<void> {
+  if (nudgeIds.length === 0) return;
+
+  try {
+    for (const nudgeId of nudgeIds) {
+      const response = await fetch(
+        `${env.SUPABASE_URL}/rest/v1/enforcement_nudges?id=eq.${nudgeId}`,
+        {
+          method: 'PATCH',
+          headers: {
+            apikey: env.SUPABASE_KEY,
+            Authorization: `Bearer ${env.SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          },
+          body: JSON.stringify({
+            status: 'delivered',
+            delivered_at: new Date().toISOString(),
+            delivery_session_id: sessionId,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        console.warn(`[gateway/nudge] Failed to mark nudge ${nudgeId} delivered: ${response.status}`);
+      }
+    }
+    console.log(`[gateway/nudge] Marked ${nudgeIds.length} nudge(s) as delivered`);
+  } catch (error) {
+    console.error('[gateway/nudge] Error marking nudges delivered:', error);
+  }
+}
+
 /**
  * Call analysis LLM (Haiku) with system+user prompt.
  * POSTs directly to Anthropic API (NOT through the gateway — that would be recursive).
@@ -732,7 +917,7 @@ export function handleHealthCheck(env: Env): Response {
 }
 
 // ============================================================================
-// Anthropic Proxy Handler (Waves 1, 2, 4)
+// Anthropic Proxy Handler (Waves 1, 2, 3, 4)
 // ============================================================================
 
 /**
@@ -740,6 +925,7 @@ export function handleHealthCheck(env: Env): Response {
  *
  * Wave 1: Extended thinking injection
  * Wave 2: Real-time AIP integrity checking
+ * Wave 3: Conscience nudge injection (pre-forward)
  * Wave 4: Webhook delivery for integrity events
  */
 export async function handleAnthropicProxy(
@@ -788,6 +974,7 @@ export async function handleAnthropicProxy(
     const originalBody = await request.text();
     let requestBody: Record<string, any> | null = null;
     let modifiedBody = originalBody;
+    let injectedNudgeIds: string[] = [];
 
     try {
       requestBody = JSON.parse(originalBody);
@@ -795,6 +982,19 @@ export async function handleAnthropicProxy(
       // Inject extended thinking if not already set
       if (requestBody && !requestBody.thinking) {
         requestBody.thinking = { type: 'enabled', budget_tokens: 10000 };
+      }
+
+      // ====================================================================
+      // Wave 3: Conscience nudge injection (pre-forward)
+      // ====================================================================
+      const agentEnforcementMode = agent.aip_enforcement_mode || 'observe';
+      if (requestBody) {
+        injectedNudgeIds = await injectPendingNudges(
+          requestBody,
+          agent.id,
+          agentEnforcementMode,
+          env
+        );
       }
 
       modifiedBody = JSON.stringify(requestBody);
@@ -834,6 +1034,13 @@ export async function handleAnthropicProxy(
     const responseHeaders = new Headers(response.headers);
     responseHeaders.set('x-smoltbot-agent', agent.id);
     responseHeaders.set('x-smoltbot-session', sessionId);
+
+    // Add nudge headers if any were injected, and mark them delivered
+    if (injectedNudgeIds.length > 0) {
+      responseHeaders.set('X-AIP-Enforcement', 'nudge');
+      responseHeaders.set('X-AIP-Nudge-Count', String(injectedNudgeIds.length));
+      ctx.waitUntil(markNudgesDelivered(injectedNudgeIds, sessionId, env));
+    }
 
     // Update last_seen and ensure alignment card is current (background)
     ctx.waitUntil(updateLastSeen(agent.id, env));
@@ -986,6 +1193,14 @@ export async function handleAnthropicProxy(
       // Background: store checkpoint and deliver webhooks
       ctx.waitUntil(storeCheckpoint(checkpoint, 'gateway', env));
       ctx.waitUntil(deliverWebhooks(checkpoint, env));
+
+      // Create pending nudge for boundary violations (nudge or enforce mode)
+      if (
+        checkpoint.verdict === 'boundary_violation' &&
+        (enforcementMode === 'nudge' || enforcementMode === 'enforce')
+      ) {
+        ctx.waitUntil(createPendingNudge(checkpoint, agent.id, sessionId, env));
+      }
 
       // Apply enforcement
       if (enforcementMode === 'enforce' && checkpoint.verdict === 'boundary_violation') {
