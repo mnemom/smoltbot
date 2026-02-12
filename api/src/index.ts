@@ -1790,6 +1790,216 @@ async function handleGetCheckpoints(env: Env, agentId: string, url: URL): Promis
   });
 }
 
+// ============================================================================
+// Unified Timeline — dual-rail AIP + AAP events with linking
+// ============================================================================
+
+interface TimelineEvent {
+  id: string;
+  timestamp: string;
+  rail: 'aip' | 'aap';
+  // Detection
+  detection: 'violation' | 'concern' | 'clear';
+  // Response (what was done about it — placeholder until enforcement is built)
+  response: 'intervention' | 'advisory' | 'noted' | 'none';
+  // Link to the other rail
+  linked_id: string | null;
+  // AIP-specific
+  aip?: {
+    checkpoint_id: string;
+    verdict: string;
+    concerns: unknown[];
+    reasoning_summary: string;
+    session_id: string;
+  };
+  // AAP-specific
+  aap?: {
+    trace_id: string;
+    action_name: string;
+    action_category: string;
+    decision_selected: string;
+    selection_reasoning: string;
+    values_applied: string[];
+    confidence: number | null;
+    verified: boolean;
+    violations: unknown[];
+  };
+}
+
+async function handleGetTimeline(env: Env, agentId: string, url: URL): Promise<Response> {
+  if (!agentId) {
+    return errorResponse('Agent ID is required', 400);
+  }
+
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+
+  // Fetch recent checkpoints (non-clear only for timeline, plus clear linked ones)
+  const { data: checkpointsData, error: cpError } = await supabaseQuery(env, 'integrity_checkpoints', {
+    filters: { agent_id: agentId },
+    select: 'checkpoint_id,timestamp,verdict,concerns,reasoning_summary,session_id,linked_trace_id',
+    order: { column: 'timestamp', ascending: false },
+    limit,
+  });
+
+  if (cpError) {
+    return errorResponse(`Database error: ${cpError}`, 500);
+  }
+
+  // Fetch recent traces
+  const { data: tracesData, error: trError } = await supabaseQuery(env, 'traces', {
+    filters: { agent_id: agentId },
+    select: 'trace_id,timestamp,action,decision,verification',
+    order: { column: 'timestamp', ascending: false },
+    limit,
+  });
+
+  if (trError) {
+    return errorResponse(`Database error: ${trError}`, 500);
+  }
+
+  const checkpoints = (checkpointsData ?? []) as Array<{
+    checkpoint_id: string;
+    timestamp: string;
+    verdict: string;
+    concerns: Array<{ category?: string; severity?: string; description?: string; evidence?: string }>;
+    reasoning_summary: string;
+    session_id: string;
+    linked_trace_id: string | null;
+  }>;
+
+  const traces = (tracesData ?? []) as Array<{
+    trace_id: string;
+    timestamp: string;
+    action: { type: string; name: string; category: string; target?: unknown };
+    decision: { selected: string; selection_reasoning: string; values_applied: string[]; confidence?: number };
+    verification: { verified: boolean; violations: unknown[] } | null;
+  }>;
+
+  // Build trace lookup by ID for linking
+  const traceById = new Map(traces.map(t => [t.trace_id, t]));
+  const linkedTraceIds = new Set<string>();
+
+  // Build timeline events from checkpoints
+  const events: TimelineEvent[] = [];
+
+  for (const cp of checkpoints) {
+    // Skip synthetic/clear checkpoints that aren't linked to anything interesting
+    if (cp.verdict === 'clear' && !cp.linked_trace_id) continue;
+
+    const detection: TimelineEvent['detection'] =
+      cp.verdict === 'boundary_violation' ? 'violation'
+      : cp.verdict === 'review_needed' ? 'concern'
+      : 'clear';
+
+    // Determine response — for now all are 'noted' since enforcement isn't built yet
+    // When enforcement lands: check interventions table for this checkpoint
+    const response: TimelineEvent['response'] = 'noted';
+
+    const event: TimelineEvent = {
+      id: cp.checkpoint_id,
+      timestamp: cp.timestamp,
+      rail: 'aip',
+      detection,
+      response,
+      linked_id: cp.linked_trace_id,
+      aip: {
+        checkpoint_id: cp.checkpoint_id,
+        verdict: cp.verdict,
+        concerns: cp.concerns,
+        reasoning_summary: cp.reasoning_summary,
+        session_id: cp.session_id,
+      },
+    };
+
+    // If linked, attach the AAP trace data inline
+    if (cp.linked_trace_id && traceById.has(cp.linked_trace_id)) {
+      const trace = traceById.get(cp.linked_trace_id)!;
+      linkedTraceIds.add(trace.trace_id);
+      event.aap = {
+        trace_id: trace.trace_id,
+        action_name: trace.action.name,
+        action_category: trace.action.category,
+        decision_selected: trace.decision.selected,
+        selection_reasoning: trace.decision.selection_reasoning,
+        values_applied: trace.decision.values_applied,
+        confidence: trace.decision.confidence ?? null,
+        verified: trace.verification?.verified ?? true,
+        violations: trace.verification?.violations ?? [],
+      };
+    }
+
+    events.push(event);
+  }
+
+  // Add unlinked AAP traces that have violations (interesting on their own)
+  for (const trace of traces) {
+    if (linkedTraceIds.has(trace.trace_id)) continue;
+    const hasViolation = trace.verification && !trace.verification.verified;
+    if (!hasViolation) continue;
+
+    events.push({
+      id: trace.trace_id,
+      timestamp: trace.timestamp,
+      rail: 'aap',
+      detection: 'violation',
+      response: 'noted',
+      linked_id: null,
+      aap: {
+        trace_id: trace.trace_id,
+        action_name: trace.action.name,
+        action_category: trace.action.category,
+        decision_selected: trace.decision.selected,
+        selection_reasoning: trace.decision.selection_reasoning,
+        values_applied: trace.decision.values_applied,
+        confidence: trace.decision.confidence ?? null,
+        verified: false,
+        violations: trace.verification?.violations ?? [],
+      },
+    });
+  }
+
+  // Sort by timestamp descending (most recent first)
+  events.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  // Classify each event by story type
+  const classified = events.map(event => {
+    let story: string;
+    if (event.aip && event.aap) {
+      // Both rails — linked event
+      const aipBad = event.detection !== 'clear';
+      const aapBad = event.aap && !event.aap.verified;
+      if (aipBad && aapBad && event.response === 'intervention') {
+        story = 'caught_and_corrected';
+      } else if (aipBad && aapBad) {
+        story = 'caught_but_missed';
+      } else if (aipBad && !aapBad) {
+        story = 'prevented';
+      } else {
+        story = 'clean_linked';
+      }
+    } else if (event.rail === 'aap' && !event.linked_id) {
+      story = 'no_warning';
+    } else if (event.rail === 'aip' && event.detection !== 'clear' && !event.linked_id) {
+      story = 'thought_only';
+    } else {
+      story = 'unclassified';
+    }
+    return { ...event, story };
+  });
+
+  return jsonResponse({
+    agent_id: agentId,
+    events: classified,
+    total: classified.length,
+    summary: {
+      caught_but_missed: classified.filter(e => e.story === 'caught_but_missed').length,
+      prevented: classified.filter(e => e.story === 'prevented').length,
+      no_warning: classified.filter(e => e.story === 'no_warning').length,
+      thought_only: classified.filter(e => e.story === 'thought_only').length,
+    },
+  });
+}
+
 async function handleGetCheckpoint(env: Env, agentId: string, checkpointId: string): Promise<Response> {
   if (!agentId) {
     return errorResponse('Agent ID is required', 400);
@@ -2661,6 +2871,12 @@ export default {
       const checkpointSingleMatch = path.match(/^\/v1\/agents\/([^/]+)\/checkpoints\/([^/]+)$/);
       if (checkpointSingleMatch && method === 'GET') {
         return handleGetCheckpoint(env, checkpointSingleMatch[1], checkpointSingleMatch[2]);
+      }
+
+      // GET /v1/agents/:id/timeline - Unified dual-rail timeline
+      const timelineMatch = path.match(/^\/v1\/agents\/([^/]+)\/timeline$/);
+      if (timelineMatch && method === 'GET') {
+        return handleGetTimeline(env, timelineMatch[1], url);
       }
 
       // GET /v1/agents/:id/checkpoints - Paginated checkpoints
