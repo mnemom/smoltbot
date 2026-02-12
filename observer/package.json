@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@mnemom/agent-alignment-protocol": "^0.1.5",
-    "@mnemom/agent-integrity-protocol": "^0.1.0"
+    "@mnemom/agent-integrity-protocol": "^0.1.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
