@@ -42,15 +42,15 @@ Your App → smoltbot gateway → AI Provider (Anthropic, etc.)
          Dashboard (mnemom.ai)
 ```
 
-1. **Gateway** — A Cloudflare Worker that intercepts API requests. It identifies your agent via API key hash (zero-config), attaches tracing metadata, and forwards requests transparently. Your prompts and responses pass through unchanged.
+1. **Gateway** — A Cloudflare Worker that intercepts API requests. It identifies your agent via API key hash (zero-config), attaches tracing metadata, injects extended thinking (Wave 1), performs real-time integrity checking (Wave 2), injects conscience nudges (Wave 3), and delivers webhooks (Wave 4). Your prompts and responses pass through unchanged.
 
-2. **Observer** — A scheduled Cloudflare Worker that processes AI Gateway logs. It extracts thinking blocks and tool calls from responses, analyzes decisions with Claude Haiku, builds [AP-Traces](https://github.com/mnemom/aap), and verifies them against your agent's alignment card using the AAP SDK.
+2. **Observer** — A scheduled Cloudflare Worker that processes AI Gateway logs. It extracts thinking blocks and tool calls from responses, analyzes decisions with Claude Haiku, builds [AP-Traces](https://github.com/mnemom/aap), verifies them against your agent's alignment card using the AAP SDK, and runs [AIP](https://github.com/mnemom/aip) integrity checks on thinking blocks. Creates enforcement nudges when violations are detected.
 
-3. **API** — Serves agent data, traces, integrity scores, drift alerts, and blog posts. Powers both the CLI and the web dashboard.
+3. **API** — Serves agent data, traces, integrity scores, drift alerts, enforcement status, and a unified conscience timeline. Powers both the CLI and the web dashboard.
 
 4. **CLI** — The `smoltbot` command. Configures your local environment and queries your agent's transparency data.
 
-5. **Dashboard** — Web UI at [mnemom.ai](https://mnemom.ai) where you can view traces, claim your agent, and monitor alignment.
+5. **Dashboard** — Web UI at [mnemom.ai](https://mnemom.ai) where you can view the conscience timeline, claim your agent, and monitor alignment.
 
 ## Architecture
 
@@ -82,8 +82,23 @@ Smoltbot builds [AP-Traces](https://github.com/mnemom/aap) that record:
 - **Decision** — What alternatives were considered and why one was selected
 - **Escalation** — Whether the agent escalated to a human and why
 - **Verification** — Whether the trace is consistent with the agent's declared alignment card
+- **Integrity** — Real-time [AIP](https://github.com/mnemom/aip) analysis of thinking blocks, with verdict (clear/review_needed/boundary_violation)
 
 What is **not** stored: your prompts, responses, or API key.
+
+## Enforcement Modes
+
+Smoltbot supports three enforcement modes for integrity violations:
+
+| Mode | Behavior |
+|------|----------|
+| `observe` | Detect violations, record them, take no action (default) |
+| `nudge` | Detect violations, inject feedback into the agent's next request via system prompt — the agent sees it and can self-correct |
+| `enforce` | Hard block with 403 for non-streaming; falls back to nudge for streaming |
+
+When a violation is detected in `nudge` or `enforce` mode, a pending nudge record is created. On the agent's next request, the gateway injects an integrity notice into the system prompt. The agent sees the notice, can review its approach, and self-correct. The nudge delivery is tracked in the conscience timeline.
+
+Set enforcement mode via the API: `PUT /v1/agents/:id/enforcement` with `{"mode": "nudge"}`.
 
 ## Current Limitations
 
@@ -93,7 +108,8 @@ What is **not** stored: your prompts, responses, or API key.
 
 ## Dependencies
 
-- [Agent Alignment Protocol (AAP)](https://github.com/mnemom/aap) — `@mnemom/agent-alignment-protocol` on npm
+- [Agent Alignment Protocol (AAP)](https://github.com/mnemom/aap) — `@mnemom/agent-alignment-protocol@0.1.7` on npm
+- [Agent Integrity Protocol (AIP)](https://github.com/mnemom/aip) — `@mnemom/agent-integrity-protocol@0.1.3` on npm
 - [Cloudflare Workers](https://workers.cloudflare.com/) — Gateway, observer, and API hosting
 - [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) — Request logging and analytics
 - [Supabase](https://supabase.com/) — Postgres database with row-level security
