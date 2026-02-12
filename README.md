@@ -108,8 +108,8 @@ Set enforcement mode via the API: `PUT /v1/agents/:id/enforcement` with `{"mode"
 
 ## Dependencies
 
-- [Agent Alignment Protocol (AAP)](https://github.com/mnemom/aap) — `@mnemom/agent-alignment-protocol@0.1.7` on npm
-- [Agent Integrity Protocol (AIP)](https://github.com/mnemom/aip) — `@mnemom/agent-integrity-protocol@0.1.3` on npm
+- [Agent Alignment Protocol (AAP)](https://github.com/mnemom/aap) — `@mnemom/agent-alignment-protocol@0.1.8` on npm
+- [Agent Integrity Protocol (AIP)](https://github.com/mnemom/aip) — `@mnemom/agent-integrity-protocol@0.1.4` on npm
 - [Cloudflare Workers](https://workers.cloudflare.com/) — Gateway, observer, and API hosting
 - [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) — Request logging and analytics
 - [Supabase](https://supabase.com/) — Postgres database with row-level security
