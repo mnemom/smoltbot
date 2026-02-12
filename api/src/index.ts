@@ -1800,7 +1800,7 @@ interface TimelineEvent {
   rail: 'aip' | 'aap';
   // Detection
   detection: 'violation' | 'concern' | 'clear';
-  // Response (what was done about it — placeholder until enforcement is built)
+  // Response (what was done about it — driven by enforcement nudge status)
   response: 'intervention' | 'advisory' | 'noted' | 'none';
   // Link to the other rail
   linked_id: string | null;
@@ -1811,6 +1811,11 @@ interface TimelineEvent {
     concerns: unknown[];
     reasoning_summary: string;
     session_id: string;
+    enforcement?: {
+      nudge_id: string;
+      status: string;
+      delivered_at: string | null;
+    } | null;
   };
   // AAP-specific
   aap?: {
@@ -1833,28 +1838,43 @@ async function handleGetTimeline(env: Env, agentId: string, url: URL): Promise<R
 
   const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
 
-  // Fetch recent checkpoints (non-clear only for timeline, plus clear linked ones)
-  const { data: checkpointsData, error: cpError } = await supabaseQuery(env, 'integrity_checkpoints', {
-    filters: { agent_id: agentId },
-    select: 'checkpoint_id,timestamp,verdict,concerns,reasoning_summary,session_id,linked_trace_id',
-    order: { column: 'timestamp', ascending: false },
-    limit,
-  });
+  // Fetch checkpoints, traces, and nudges in parallel
+  const [
+    { data: checkpointsData, error: cpError },
+    { data: tracesData, error: trError },
+    { data: nudgesData, error: nudgeError },
+  ] = await Promise.all([
+    supabaseQuery(env, 'integrity_checkpoints', {
+      filters: { agent_id: agentId },
+      select: 'checkpoint_id,timestamp,verdict,concerns,reasoning_summary,session_id,linked_trace_id',
+      order: { column: 'timestamp', ascending: false },
+      limit,
+    }),
+    supabaseQuery(env, 'traces', {
+      filters: { agent_id: agentId },
+      select: 'trace_id,timestamp,action,decision,verification',
+      order: { column: 'timestamp', ascending: false },
+      limit,
+    }),
+    supabaseQuery(env, 'enforcement_nudges', {
+      filters: { agent_id: agentId },
+      select: 'id,checkpoint_id,status,concerns_summary,created_at,delivered_at',
+      order: { column: 'created_at', ascending: false },
+      limit,
+    }),
+  ]);
 
   if (cpError) {
     return errorResponse(`Database error: ${cpError}`, 500);
   }
 
-  // Fetch recent traces
-  const { data: tracesData, error: trError } = await supabaseQuery(env, 'traces', {
-    filters: { agent_id: agentId },
-    select: 'trace_id,timestamp,action,decision,verification',
-    order: { column: 'timestamp', ascending: false },
-    limit,
-  });
-
   if (trError) {
     return errorResponse(`Database error: ${trError}`, 500);
+  }
+
+  if (nudgeError) {
+    // Non-fatal: nudges are supplementary data
+    console.warn(`[api/timeline] Failed to fetch nudges: ${nudgeError}`);
   }
 
   const checkpoints = (checkpointsData ?? []) as Array<{
@@ -1875,8 +1895,18 @@ async function handleGetTimeline(env: Env, agentId: string, url: URL): Promise<R
     verification: { verified: boolean; violations: unknown[] } | null;
   }>;
 
+  const nudges = (nudgesData ?? []) as Array<{
+    id: string;
+    checkpoint_id: string;
+    status: string;
+    concerns_summary: string;
+    created_at: string;
+    delivered_at: string | null;
+  }>;
+
   // Build trace lookup by ID for linking
   const traceById = new Map(traces.map(t => [t.trace_id, t]));
+  const nudgeByCheckpoint = new Map(nudges.map(n => [n.checkpoint_id, n]));
   const linkedTraceIds = new Set<string>();
 
   // Build timeline events from checkpoints
@@ -1891,9 +1921,12 @@ async function handleGetTimeline(env: Env, agentId: string, url: URL): Promise<R
       : cp.verdict === 'review_needed' ? 'concern'
       : 'clear';
 
-    // Determine response — for now all are 'noted' since enforcement isn't built yet
-    // When enforcement lands: check interventions table for this checkpoint
-    const response: TimelineEvent['response'] = 'noted';
+    // Determine response based on enforcement nudge status
+    const nudge = nudgeByCheckpoint.get(cp.checkpoint_id);
+    const response: TimelineEvent['response'] =
+      nudge?.status === 'delivered' ? 'intervention'
+      : nudge?.status === 'pending' ? 'advisory'
+      : 'noted';
 
     const event: TimelineEvent = {
       id: cp.checkpoint_id,
@@ -1908,6 +1941,11 @@ async function handleGetTimeline(env: Env, agentId: string, url: URL): Promise<R
         concerns: cp.concerns,
         reasoning_summary: cp.reasoning_summary,
         session_id: cp.session_id,
+        enforcement: nudge ? {
+          nudge_id: nudge.id,
+          status: nudge.status,
+          delivered_at: nudge.delivered_at,
+        } : null,
       },
     };
 
@@ -1992,6 +2030,7 @@ async function handleGetTimeline(env: Env, agentId: string, url: URL): Promise<R
     events: classified,
     total: classified.length,
     summary: {
+      caught_and_corrected: classified.filter(e => e.story === 'caught_and_corrected').length,
       caught_but_missed: classified.filter(e => e.story === 'caught_but_missed').length,
       prevented: classified.filter(e => e.story === 'prevented').length,
       no_warning: classified.filter(e => e.story === 'no_warning').length,
@@ -2690,8 +2729,8 @@ async function handlePutEnforcement(env: Env, agentId: string, request: Request)
     return errorResponse('Invalid JSON body', 400);
   }
 
-  if (!body.mode || (body.mode !== 'observe' && body.mode !== 'enforce')) {
-    return errorResponse('mode must be "observe" or "enforce"', 400);
+  if (!body.mode || !['observe', 'enforce', 'nudge'].includes(body.mode)) {
+    return errorResponse('mode must be "observe", "enforce", or "nudge"', 400);
   }
 
   const { data, error } = await supabaseUpdate(
