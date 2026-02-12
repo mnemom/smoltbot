@@ -118,13 +118,31 @@ function createMockProviderResponse(thinking: string, text: string) {
 // AAP → AIP Card Mapping (re-implements observer logic for testing)
 // ============================================================================
 
+function extractAgentDescription(card: AlignmentCard): string | undefined {
+  const extensions = card.extensions as Record<string, unknown> | null | undefined;
+  if (!extensions) return undefined;
+  for (const ns of Object.values(extensions)) {
+    if (ns && typeof ns === 'object' && 'description' in (ns as Record<string, unknown>)) {
+      const desc = (ns as Record<string, unknown>).description;
+      if (typeof desc === 'string') return desc;
+    }
+  }
+  return undefined;
+}
+
 function mapAAPCardToAIP(card: AlignmentCard) {
+  const defs = card.values.definitions as Record<string, { name?: string; description?: string; priority?: number }> | null | undefined;
   return {
     card_id: card.card_id,
-    values: (card.values.declared || []).map((v: string, i: number) => ({
-      name: v,
-      priority: i + 1,
-    })),
+    agent_description: extractAgentDescription(card),
+    values: (card.values.declared || []).map((v: string, i: number) => {
+      const def = defs?.[v];
+      return {
+        name: v,
+        priority: def?.priority ?? (i + 1),
+        ...(def?.description ? { description: def.description } : {}),
+      };
+    }),
     autonomy_envelope: {
       bounded_actions: card.autonomy_envelope.bounded_actions,
       forbidden_actions: card.autonomy_envelope.forbidden_actions ?? undefined,
@@ -195,6 +213,51 @@ describe('AAP → AIP Card Mapping', () => {
     });
     const aipCard = mapAAPCardToAIP(aapCard);
     expect(aipCard.values).toHaveLength(0);
+  });
+
+  it('should include value descriptions from definitions', () => {
+    const aapCard = createMockAAPCard({
+      values: {
+        declared: ['transparency', 'rigor'],
+        definitions: {
+          rigor: {
+            name: 'Investigative Rigor',
+            description: 'Broad exploratory research',
+            priority: 1,
+          },
+        },
+      },
+    });
+    const aipCard = mapAAPCardToAIP(aapCard);
+
+    // rigor has definition with priority and description
+    expect(aipCard.values[1].name).toBe('rigor');
+    expect(aipCard.values[1].priority).toBe(1);
+    expect(aipCard.values[1].description).toBe('Broad exploratory research');
+
+    // transparency has no definition — positional priority, no description
+    expect(aipCard.values[0].name).toBe('transparency');
+    expect(aipCard.values[0].priority).toBe(1); // positional: index 0 + 1
+    expect(aipCard.values[0].description).toBeUndefined();
+  });
+
+  it('should extract agent_description from extensions', () => {
+    const aapCard = createMockAAPCard({
+      extensions: {
+        mnemom: {
+          role: 'AI journalist',
+          description: 'Independent AI correspondent covering the agent ecosystem',
+        },
+      },
+    });
+    const aipCard = mapAAPCardToAIP(aapCard);
+    expect(aipCard.agent_description).toBe('Independent AI correspondent covering the agent ecosystem');
+  });
+
+  it('should return undefined agent_description when no extensions', () => {
+    const aapCard = createMockAAPCard();
+    const aipCard = mapAAPCardToAIP(aapCard);
+    expect(aipCard.agent_description).toBeUndefined();
   });
 });
 

@@ -309,12 +309,17 @@ async function processLog(
     console.log('[observer/aip] Gateway checkpoint exists for session, skipping');
   } else {
     console.log(`[observer/aip] Running integrity check for ${agent_id}, provider=${log.provider}, responseLen=${bodies.response.length}, hasCard=${!!card}`);
+    // Construct task context from tool calls (PII-safe: only tool names)
+    const taskContext = context.toolCalls.length > 0
+      ? `Agent performing: ${context.toolCalls.map(t => t.name).join(', ')}`
+      : undefined;
     aipSignal = await runIntegrityCheck(
       bodies.response,
       log.provider,
       agent_id,
       card,
-      env
+      env,
+      taskContext
     );
     console.log(`[observer/aip] runIntegrityCheck returned: ${aipSignal ? `verdict=${aipSignal.checkpoint.verdict}` : 'null'}`);
   }
@@ -1017,6 +1022,22 @@ async function submitUsageEvent(
 // ============================================================================
 
 /**
+ * Extract agent description from AAP card extensions (PII-safe).
+ * Searches extension namespaces for a 'description' field describing the agent's role.
+ */
+function extractAgentDescription(card: AlignmentCard): string | undefined {
+  const extensions = card.extensions as Record<string, unknown> | null | undefined;
+  if (!extensions) return undefined;
+  for (const ns of Object.values(extensions)) {
+    if (ns && typeof ns === 'object' && 'description' in (ns as Record<string, unknown>)) {
+      const desc = (ns as Record<string, unknown>).description;
+      if (typeof desc === 'string') return desc;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Run an AIP integrity check on the response body.
  * Creates an ephemeral AIP client, runs the check, and destroys the client.
  * Fail-open: returns null on any error so existing processing is unaffected.
@@ -1026,7 +1047,8 @@ async function runIntegrityCheck(
   provider: string,
   agentId: string,
   card: AlignmentCard | null,
-  env: Env
+  env: Env,
+  taskContext?: string
 ): Promise<IntegritySignal | null> {
   if (!card) {
     console.log('[observer/aip] Skipping integrity check: no alignment card');
@@ -1039,13 +1061,20 @@ async function runIntegrityCheck(
     const analysisApiKey = env.ANALYSIS_API_KEY || env.ANTHROPIC_API_KEY;
     const analysisBaseUrl = env.CF_AI_GATEWAY_URL || 'https://api.anthropic.com';
 
-    // Map AAP AlignmentCard fields to AIP's minimal card interface
+    // Map AAP AlignmentCard fields to AIP's card interface
+    // Include value definitions and agent description for analysis context (PII-safe)
+    const defs = card.values.definitions as Record<string, { name?: string; description?: string; priority?: number }> | null | undefined;
     const aipCard = {
       card_id: card.card_id,
-      values: (card.values.declared || []).map((v: string, i: number) => ({
-        name: v,
-        priority: i + 1,
-      })),
+      agent_description: extractAgentDescription(card),
+      values: (card.values.declared || []).map((v: string, i: number) => {
+        const def = defs?.[v];
+        return {
+          name: v,
+          priority: def?.priority ?? (i + 1),
+          ...(def?.description ? { description: def.description } : {}),
+        };
+      }),
       autonomy_envelope: {
         bounded_actions: card.autonomy_envelope.bounded_actions,
         forbidden_actions: card.autonomy_envelope.forbidden_actions ?? undefined,
@@ -1081,7 +1110,7 @@ async function runIntegrityCheck(
     };
 
     client = createClient(config);
-    const signal = await client.check(responseBody, provider);
+    const signal = await client.check(responseBody, provider, taskContext);
 
     console.log(
       `[observer/aip] Integrity check complete: verdict=${signal.checkpoint.verdict}, ` +
