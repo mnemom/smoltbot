@@ -519,9 +519,9 @@ async function handleUpdateAgentCard(env: Env, agentId: string, request: Request
     return errorResponse('Agent ID is required', 400);
   }
 
-  const body = await request.json() as { card_json: AlignmentCard };
-  if (!body.card_json) {
-    return errorResponse('card_json is required in request body', 400);
+  const body = await request.json() as { card_json?: AlignmentCard; conscience_values?: unknown[] };
+  if (!body.card_json && !body.conscience_values) {
+    return errorResponse('card_json or conscience_values is required in request body', 400);
   }
 
   const headers = {
@@ -531,15 +531,18 @@ async function handleUpdateAgentCard(env: Env, agentId: string, request: Request
   };
 
   const cardId = `ac-${agentId.replace('smolt-', '')}`;
+  const updatePayload: Record<string, unknown> = {
+    issued_at: new Date().toISOString(),
+  };
+  if (body.card_json) updatePayload.card_json = body.card_json;
+  if (body.conscience_values) updatePayload.conscience_values = body.conscience_values;
+
   const response = await fetch(
     `${env.SUPABASE_URL}/rest/v1/alignment_cards?id=eq.${cardId}`,
     {
       method: 'PATCH',
       headers,
-      body: JSON.stringify({
-        card_json: body.card_json,
-        issued_at: new Date().toISOString(),
-      }),
+      body: JSON.stringify(updatePayload),
     }
   );
 
