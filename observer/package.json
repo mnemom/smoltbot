@@ -8,8 +8,8 @@
     "test": "vitest"
   },
   "dependencies": {
-    "@mnemom/agent-alignment-protocol": "^0.1.5",
-    "@mnemom/agent-integrity-protocol": "^0.1.2"
+    "@mnemom/agent-alignment-protocol": "^0.1.7",
+    "@mnemom/agent-integrity-protocol": "file:../../aip/packages/typescript/mnemom-agent-integrity-protocol-0.1.3.tgz"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",
