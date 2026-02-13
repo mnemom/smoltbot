@@ -73,6 +73,16 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   console.log("✓ Anthropic API key found in auth-profiles.json\n");
   console.log("  Note: Only API key auth is supported (not OAuth)\n");
 
+  // Step 3b: Verify API key works with Anthropic
+  console.log("Verifying API key with Anthropic...");
+  const verification = await verifyApiKey(detection.apiKey);
+  if (!verification.valid) {
+    console.log(`\n✗ ${verification.error}\n`);
+    console.log("Get a valid API key from https://console.anthropic.com/settings/keys\n");
+    process.exit(1);
+  }
+  console.log("✓ API key verified\n");
+
   // Step 4: Detect current model
   const { modelId, provider } = parseCurrentModel(detection);
 
@@ -312,8 +322,16 @@ function showSuccessMessage(
   console.log(`  ${DASHBOARD_URL}/agents/${agentId}\n`);
 
   console.log("─".repeat(50));
+  console.log("\nClaim your agent:\n");
+  console.log("  smoltbot claim\n");
+  console.log("  This links your agent to your Mnemom account so");
+  console.log("  you can manage traces and keep your data private.\n");
+  console.log(`  Or visit: ${DASHBOARD_URL}/claim/${agentId}\n`);
+
+  console.log("─".repeat(50));
   console.log("\nUseful commands:\n");
   console.log("  smoltbot status     - Check configuration and connectivity");
+  console.log("  smoltbot claim      - Claim agent and link to your account");
   console.log("  smoltbot logs       - View recent traces");
   console.log("  smoltbot integrity  - View integrity score\n");
 
@@ -321,4 +339,45 @@ function showSuccessMessage(
   console.log("\nTo switch between traced and untraced mode:\n");
   console.log(`  Traced:   openclaw models set smoltbot/${modelId}`);
   console.log(`  Untraced: openclaw models set anthropic/${modelId}\n`);
+}
+
+/**
+ * Verify an API key works with Anthropic by making a minimal API call.
+ * Fail-open: network errors and 5xx responses don't block init.
+ */
+async function verifyApiKey(apiKey: string): Promise<{ valid: boolean; error?: string }> {
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-3-5-haiku-20241022",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (response.ok || response.status === 429) {
+      return { valid: true };
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        valid: false,
+        error: "API key is invalid or has been revoked.",
+      };
+    }
+
+    // Other errors (500, etc.) — don't block init
+    return { valid: true };
+  } catch {
+    // Network error or timeout — don't block init
+    console.log("  Could not verify API key (network error). Proceeding anyway.\n");
+    return { valid: true };
+  }
 }

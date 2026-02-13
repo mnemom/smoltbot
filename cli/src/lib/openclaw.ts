@@ -119,7 +119,7 @@ export function loadAuthProfiles(): AuthProfilesFile | null {
 /**
  * Get the Anthropic API key from auth-profiles.json
  */
-export function getAnthropicApiKey(): { key: string | null; isOAuth: boolean } {
+export function getAnthropicApiKey(): { key: string | null; isOAuth: boolean; invalidFormat?: boolean } {
   const profiles = loadAuthProfiles();
   if (!profiles) {
     return { key: null, isOAuth: false };
@@ -136,6 +136,11 @@ export function getAnthropicApiKey(): { key: string | null; isOAuth: boolean } {
 
   if (anthropicProfile.type === "oauth" || !anthropicProfile.key) {
     return { key: null, isOAuth: true };
+  }
+
+  // Validate key format — Anthropic API keys start with "sk-ant-"
+  if (!anthropicProfile.key.startsWith("sk-ant-")) {
+    return { key: null, isOAuth: false, invalidFormat: true };
   }
 
   return { key: anthropicProfile.key, isOAuth: false };
@@ -239,7 +244,19 @@ export function detectOpenClaw(): OpenClawDetectionResult {
   }
 
   // Check auth profile
-  const { key, isOAuth } = getAnthropicApiKey();
+  const { key, isOAuth, invalidFormat } = getAnthropicApiKey();
+
+  if (invalidFormat) {
+    return {
+      installed: true,
+      hasApiKey: false,
+      isOAuth: false,
+      smoltbotAlreadyConfigured: isSmoltbotConfigured(),
+      error:
+        "Invalid API key format. Anthropic API keys start with 'sk-ant-'.\n" +
+        "Get a valid key from https://console.anthropic.com/settings/keys",
+    };
+  }
 
   if (isOAuth) {
     return {
