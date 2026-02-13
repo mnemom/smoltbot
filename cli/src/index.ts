@@ -10,7 +10,7 @@ import { claimCommand } from "./commands/claim.js";
 program
   .name("smoltbot")
   .description("Transparent AI agent tracing - AAP compliant")
-  .version("2.0.0");
+  .version("2.1.0");
 
 program
   .command("init")
