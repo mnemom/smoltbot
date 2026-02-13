@@ -116,11 +116,29 @@ jobs:
         working-directory: cli
         run: npm ci
 
+      - name: Check if version already published
+        id: version-check
+        working-directory: cli
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          REMOTE=$(npm view @mnemom/smoltbot version 2>/dev/null || echo "0.0.0")
+          echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
+          echo "remote=$REMOTE" >> "$GITHUB_OUTPUT"
+          if [ "$LOCAL" = "$REMOTE" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "CLI v$LOCAL already published — skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing CLI v$LOCAL (npm has v$REMOTE)"
+          fi
+
       - name: Build
+        if: steps.version-check.outputs.skip != 'true'
         working-directory: cli
         run: npm run build
 
       - name: Publish
+        if: steps.version-check.outputs.skip != 'true'
         working-directory: cli
         run: npm publish --access public
         env:
