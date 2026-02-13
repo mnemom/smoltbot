@@ -31,6 +31,8 @@ import {
   type ConscienceValue,
 } from '@mnemom/agent-integrity-protocol';
 
+import { createWorkersExporter } from '@mnemom/aip-otel-exporter/workers';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -43,6 +45,8 @@ export interface Env {
   GATEWAY_VERSION: string;
   ANTHROPIC_API_KEY: string;  // For AIP analysis LLM calls
   AIP_ENABLED: string;        // Feature flag ("true"/"false"), default "true"
+  OTLP_ENDPOINT?: string;
+  OTLP_AUTH?: string;
 }
 
 interface Agent {
@@ -908,6 +912,19 @@ async function deliverWebhooks(
 }
 
 // ============================================================================
+// OTel Exporter
+// ============================================================================
+
+function createOTelExporter(env: Env) {
+  if (!env.OTLP_ENDPOINT) return null;
+  return createWorkersExporter({
+    endpoint: env.OTLP_ENDPOINT,
+    authorization: env.OTLP_AUTH,
+    serviceName: 'smoltbot-gateway',
+  });
+}
+
+// ============================================================================
 // Health Check
 // ============================================================================
 
@@ -960,6 +977,8 @@ export async function handleAnthropicProxy(
       }
     );
   }
+
+  const otelExporter = createOTelExporter(env);
 
   try {
     // Hash the API key for agent identification
@@ -1220,6 +1239,10 @@ export async function handleAnthropicProxy(
       const summary = window.getSummary();
       const signal = buildSignal(checkpoint, summary);
 
+      if (otelExporter) {
+        otelExporter.recordIntegrityCheck(signal);
+      }
+
       // Detect drift
       let driftState: DriftState = createDriftState();
       const driftResult = detectIntegrityDrift(
@@ -1239,9 +1262,12 @@ export async function handleAnthropicProxy(
       responseHeaders.set('X-AIP-Action', signal.recommended_action);
       responseHeaders.set('X-AIP-Proceed', String(signal.proceed));
 
-      // Background: store checkpoint and deliver webhooks
+      // Background: store checkpoint, deliver webhooks, flush OTel
       ctx.waitUntil(storeCheckpoint(checkpoint, 'gateway', env));
       ctx.waitUntil(deliverWebhooks(checkpoint, env));
+      if (otelExporter) {
+        ctx.waitUntil(otelExporter.flush());
+      }
 
       // Create pending nudge for boundary violations (nudge or enforce mode)
       if (
