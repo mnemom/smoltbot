@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@mnemom/agent-alignment-protocol": "^0.1.8",
-    "@mnemom/agent-integrity-protocol": "^0.1.4"
+    "@mnemom/agent-integrity-protocol": "^0.1.4",
+    "@mnemom/aip-otel-exporter": "^0.1.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",

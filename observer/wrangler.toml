@@ -8,3 +8,7 @@ crons = ["* * * * *"]
 
 [vars]
 GATEWAY_ID = "smoltbot"
+
+# Secrets (set via wrangler secret put):
+# OTLP_ENDPOINT  (Grafana Cloud / OTel collector)
+# OTLP_AUTH       (e.g. "Basic <base64>")

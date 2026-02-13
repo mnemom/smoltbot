@@ -17,3 +17,5 @@ GATEWAY_VERSION = "2.0.0"
 # SUPABASE_URL
 # SUPABASE_KEY
 # CF_AI_GATEWAY_URL
+# OTLP_ENDPOINT  (Grafana Cloud / OTel collector)
+# OTLP_AUTH       (e.g. "Basic <base64>")

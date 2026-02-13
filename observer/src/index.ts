@@ -39,6 +39,8 @@ import {
   type IntegrityCheckpoint,
 } from '@mnemom/agent-integrity-protocol';
 
+import { createWorkersExporter, type WorkersOTelExporter } from '@mnemom/aip-otel-exporter/workers';
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -52,6 +54,8 @@ interface Env {
   SUPABASE_KEY: string;
   ANTHROPIC_API_KEY: string;
   ANALYSIS_API_KEY?: string;
+  OTLP_ENDPOINT?: string;
+  OTLP_AUTH?: string;
 }
 
 interface GatewayLog {
@@ -110,14 +114,21 @@ export default {
   ): Promise<void> {
     console.log('[observer] Scheduled trigger started');
 
+    const otelExporter = createOTelExporter(env);
+
     try {
-      const stats = await processAllLogs(env, ctx);
+      const stats = await processAllLogs(env, ctx, otelExporter);
       console.log(
         `[observer] Completed - processed: ${stats.processed}, skipped: ${stats.skipped}, errors: ${stats.errors}`
       );
 
       // Expire stale nudges (>4h old pending nudges)
       ctx.waitUntil(expireStaleNudges(env));
+
+      // Flush OTel spans for all processed logs in one batch
+      if (otelExporter) {
+        ctx.waitUntil(otelExporter.flush());
+      }
     } catch (error) {
       console.error('[observer] Fatal error in scheduled handler:', error);
     }
@@ -146,12 +157,15 @@ export default {
     if (url.pathname === '/trigger') {
       console.log('[observer] Manual trigger initiated');
 
+      const otelExporter = createOTelExporter(env);
+
       // Run processing in background
       ctx.waitUntil(
-        processAllLogs(env, ctx).then((stats) => {
+        processAllLogs(env, ctx, otelExporter).then(async (stats) => {
           console.log(
             `[observer] Manual trigger completed - processed: ${stats.processed}`
           );
+          if (otelExporter) await otelExporter.flush();
         })
       );
 
@@ -193,6 +207,19 @@ export default {
 };
 
 // ============================================================================
+// OTel Exporter
+// ============================================================================
+
+function createOTelExporter(env: Env) {
+  if (!env.OTLP_ENDPOINT) return null;
+  return createWorkersExporter({
+    endpoint: env.OTLP_ENDPOINT,
+    authorization: env.OTLP_AUTH,
+    serviceName: 'smoltbot-observer',
+  });
+}
+
+// ============================================================================
 // Main Processing Logic
 // ============================================================================
 
@@ -201,7 +228,8 @@ export default {
  */
 async function processAllLogs(
   env: Env,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  otelExporter?: WorkersOTelExporter | null
 ): Promise<ProcessingStats> {
   const stats: ProcessingStats = { processed: 0, skipped: 0, errors: 0 };
 
@@ -211,7 +239,7 @@ async function processAllLogs(
 
     for (const log of logs) {
       try {
-        const wasProcessed = await processLog(log, env, ctx);
+        const wasProcessed = await processLog(log, env, ctx, otelExporter);
         if (wasProcessed) {
           stats.processed++;
         } else {
@@ -238,7 +266,8 @@ async function processAllLogs(
 async function processLog(
   log: GatewayLog,
   env: Env,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  otelExporter?: WorkersOTelExporter | null
 ): Promise<boolean> {
   // Extract metadata from log - CF AI Gateway parses cf-aig-metadata header
   // and returns it directly as the metadata object (not nested under a key)
@@ -288,6 +317,10 @@ async function processLog(
 
   // Verify trace against alignment card using AAP SDK
   const verification = card ? verifyTrace(trace, card) : null;
+
+  if (verification && otelExporter) {
+    otelExporter.recordVerification(verification);
+  }
 
   // Check if gateway already created a checkpoint for this session (dedup)
   let gatewayCheckpointExists = false;
@@ -346,6 +379,10 @@ async function processLog(
       recentCheckpoints
     );
     console.log(`[observer/aip] runIntegrityCheck returned: ${aipSignal ? `verdict=${aipSignal.checkpoint.verdict}` : 'null'}`);
+
+    if (aipSignal && otelExporter) {
+      otelExporter.recordIntegrityCheck(aipSignal);
+    }
   }
 
   // Enrich trace metadata with AIP results before submission
@@ -376,7 +413,7 @@ async function processLog(
   }
 
   // Check for behavioral drift (runs in background)
-  ctx.waitUntil(checkForDrift(agent_id, card, env));
+  ctx.waitUntil(checkForDrift(agent_id, card, env, otelExporter));
 
   // Delete processed log for privacy
   await deleteLog(log.id, env);
@@ -1247,7 +1284,8 @@ async function fetchRecentCheckpoints(
 async function checkForDrift(
   agentId: string,
   card: AlignmentCard | null,
-  env: Env
+  env: Env,
+  otelExporter?: WorkersOTelExporter | null
 ): Promise<void> {
   if (!card) {
     return;
@@ -1282,6 +1320,10 @@ async function checkForDrift(
 
     // Use AAP SDK drift detection - returns DriftAlert[]
     const driftAlerts: DriftAlert[] = detectDrift(card, apTraces);
+
+    if (driftAlerts.length > 0 && otelExporter) {
+      otelExporter.recordDrift(driftAlerts, apTraces.length);
+    }
 
     // Limit to first alert to prevent subrequest overflow
     // TODO: Add proper deduplication - check if similar alert exists before storing
