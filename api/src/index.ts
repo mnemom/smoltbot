@@ -2923,6 +2923,20 @@ async function handleResolve(env: Env, agentId: string, request: Request): Promi
   });
 }
 
+async function handleGetResolutions(env: Env, agentId: string): Promise<Response> {
+  const { data, error } = await supabaseQuery(env, 'resolutions', {
+    filters: { agent_id: agentId },
+    select: 'id,target_type,target_id,resolution_type,resolved_by,resolved_at,metadata',
+    order: { column: 'resolved_at', ascending: false },
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  return jsonResponse({ resolutions: data ?? [] });
+}
+
 // Main request handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -3106,6 +3120,12 @@ export default {
       const aipWebhookDeleteMatch = path.match(/^\/v1\/aip\/webhooks\/([^/]+)$/);
       if (aipWebhookDeleteMatch && method === 'DELETE') {
         return handleDeleteAipWebhook(env, aipWebhookDeleteMatch[1]);
+      }
+
+      // GET /v1/agents/:id/resolutions - List resolutions for an agent
+      const resolutionsMatch = path.match(/^\/v1\/agents\/([^/]+)\/resolutions$/);
+      if (resolutionsMatch && method === 'GET') {
+        return handleGetResolutions(env, resolutionsMatch[1]);
       }
 
       // POST /v1/agents/:id/resolve - Resolve a concern/violation
