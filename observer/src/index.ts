@@ -316,17 +316,34 @@ async function processLog(
     console.log('[observer/aip] Gateway checkpoint exists for session, skipping');
   } else {
     console.log(`[observer/aip] Running integrity check for ${agent_id}, provider=${log.provider}, responseLen=${bodies.response.length}, hasCard=${!!card}`);
-    // Construct task context from tool calls (PII-safe: only tool names)
-    const taskContext = context.toolCalls.length > 0
-      ? `Agent performing: ${context.toolCalls.map(t => t.name).join(', ')}`
-      : undefined;
+    // Build enriched task context (PII-safe: role + tool names + truncated query)
+    const agentRole = (card as any)?.extensions?.mnemom?.description
+      || (card as any)?.extensions?.mnemom?.role
+      || '';
+    const toolNames = context.toolCalls.length > 0
+      ? context.toolCalls.map(t => t.name).join(', ')
+      : '';
+    const userQueryTruncated = context.userQuery
+      ? context.userQuery.slice(0, 200)
+      : '';
+    const taskParts = [
+      agentRole ? `${agentRole}.` : '',
+      toolNames ? `Currently: ${toolNames}.` : '',
+      userQueryTruncated ? `User request: ${userQueryTruncated}` : '',
+    ].filter(Boolean);
+    const taskContext = taskParts.length > 0 ? taskParts.join(' ') : undefined;
+
+    // Fetch recent checkpoints for window hydration
+    const recentCheckpoints = await fetchRecentCheckpoints(agent_id, session_id, env);
+
     aipSignal = await runIntegrityCheck(
       bodies.response,
       log.provider,
       agent_id,
       card,
       env,
-      taskContext
+      taskContext,
+      recentCheckpoints
     );
     console.log(`[observer/aip] runIntegrityCheck returned: ${aipSignal ? `verdict=${aipSignal.checkpoint.verdict}` : 'null'}`);
   }
@@ -1055,7 +1072,8 @@ async function runIntegrityCheck(
   agentId: string,
   card: AlignmentCard | null,
   env: Env,
-  taskContext?: string
+  taskContext?: string,
+  initialCheckpoints?: any[]
 ): Promise<IntegritySignal | null> {
   if (!card) {
     console.log('[observer/aip] Skipping integrity check: no alignment card');
@@ -1095,9 +1113,11 @@ async function runIntegrityCheck(
       },
     };
 
-    const config: AIPConfig = {
+    // Note: initial_checkpoints will be a recognized AIPConfig field once AIP SDK v0.1.5 lands
+    const config: AIPConfig & { initial_checkpoints?: any[] } = {
       card: aipCard,
       conscience_values: [...DEFAULT_CONSCIENCE_VALUES],
+      initial_checkpoints: initialCheckpoints,
       analysis_llm: {
         model: 'claude-3-5-haiku-20241022',
         base_url: analysisBaseUrl,
@@ -1185,6 +1205,39 @@ async function submitCheckpoint(
     }
   } catch (error) {
     console.error('[observer/aip] Error submitting checkpoint:', error);
+  }
+}
+
+/**
+ * Fetch recent checkpoints for window hydration (same pattern as gateway).
+ */
+async function fetchRecentCheckpoints(
+  agentId: string,
+  sessionId: string,
+  env: Env
+): Promise<any[]> {
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&session_id=eq.${sessionId}&order=timestamp.desc&limit=10`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`[observer/aip] Failed to fetch checkpoints for hydration: ${response.status}`);
+      return [];
+    }
+
+    const rows = (await response.json()) as any[];
+    // Reverse to chronological order (oldest first) for window hydration
+    return rows.reverse();
+  } catch (error) {
+    console.error(`[observer/aip] Error fetching checkpoints for hydration:`, error);
+    return [];
   }
 }
 
