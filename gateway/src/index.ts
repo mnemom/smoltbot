@@ -302,18 +302,31 @@ export function buildMetadataHeader(
 // ============================================================================
 
 /**
+ * Extract PII-safe agent description from card extensions.
+ */
+function extractAgentDescription(cardJson: Record<string, any>): string | undefined {
+  return cardJson.extensions?.mnemom?.description ?? undefined;
+}
+
+/**
  * Map AAP card_json to AIP AlignmentCard interface.
  * Same mapping pattern used by the observer.
  */
 function mapCardToAIP(cardJson: Record<string, any>): AIPAlignmentCard {
   const declaredValues: string[] = cardJson.values?.declared || [];
-  const values: AlignmentCardValue[] = declaredValues.map((v: string, i: number) => ({
-    name: v,
-    priority: i + 1,
-  }));
+  const defs = cardJson.values?.definitions as Record<string, { name?: string; description?: string; priority?: number }> | null | undefined;
+  const values: AlignmentCardValue[] = declaredValues.map((v: string, i: number) => {
+    const def = defs?.[v];
+    return {
+      name: v,
+      priority: def?.priority ?? (i + 1),
+      ...(def?.description ? { description: def.description } : {}),
+    };
+  });
 
   return {
     card_id: cardJson.card_id || 'unknown',
+    agent_description: extractAgentDescription(cardJson),
     values,
     autonomy_envelope: {
       bounded_actions: cardJson.autonomy_envelope?.bounded_actions ?? [],
@@ -1137,11 +1150,37 @@ export async function handleAnthropicProxy(
 
       // Build conscience prompt
       const values: ConscienceValue[] = conscienceValues || [...DEFAULT_CONSCIENCE_VALUES];
+      // Build task context from request messages and card description (PII-safe)
+      const gatewayAgentDesc = card?.extensions?.mnemom?.description
+        || card?.extensions?.mnemom?.role
+        || '';
+      let gatewayUserQuery = '';
+      try {
+        const msgs = requestBody?.messages;
+        if (Array.isArray(msgs) && msgs.length > 0) {
+          const lastUserMsg = [...msgs].reverse().find((m: any) => m.role === 'user');
+          if (lastUserMsg) {
+            const content = typeof lastUserMsg.content === 'string'
+              ? lastUserMsg.content
+              : Array.isArray(lastUserMsg.content)
+                ? lastUserMsg.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ')
+                : '';
+            gatewayUserQuery = content.slice(0, 200);
+          }
+        }
+      } catch { /* fail-open */ }
+      const gatewayTaskParts = [
+        gatewayAgentDesc ? `${gatewayAgentDesc}.` : '',
+        gatewayUserQuery ? `User request: ${gatewayUserQuery}` : '',
+      ].filter(Boolean);
+      const gatewayTaskContext = gatewayTaskParts.length > 0 ? gatewayTaskParts.join(' ') : undefined;
+
       const prompt = buildConsciencePrompt({
         card: aipCard,
         conscienceValues: values,
         windowContext: window.getState().checkpoints,
         thinkingBlock: thinking.content,
+        taskContext: gatewayTaskContext,
       });
 
       // Call analysis LLM (Haiku)
