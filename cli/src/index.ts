@@ -5,6 +5,7 @@ import { initCommand } from "./commands/init.js";
 import { statusCommand } from "./commands/status.js";
 import { integrityCommand } from "./commands/integrity.js";
 import { logsCommand } from "./commands/logs.js";
+import { claimCommand } from "./commands/claim.js";
 
 program
   .name("smoltbot")
@@ -57,6 +58,18 @@ program
     try {
       const limit = parseInt(options.limit, 10);
       await logsCommand({ limit: isNaN(limit) ? 10 : limit });
+    } catch (error) {
+      console.error("Error:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("claim")
+  .description("Claim your agent and link it to your Mnemom account")
+  .action(async () => {
+    try {
+      await claimCommand();
     } catch (error) {
       console.error("Error:", error instanceof Error ? error.message : error);
       process.exit(1);

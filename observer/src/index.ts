@@ -251,6 +251,13 @@ async function processLog(
     return false;
   }
 
+  // Skip failed API calls (e.g. 401 from invalid keys) — not behavioral events
+  if (!log.success) {
+    console.log(`[observer] Skipping ${log.id}: upstream API error (success=false)`);
+    await deleteLog(log.id, env);
+    return false;
+  }
+
   const { agent_id, session_id } = metadata;
 
   console.log(`[observer] Processing log ${log.id} for agent ${agent_id}`);

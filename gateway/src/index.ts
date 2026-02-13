@@ -1066,6 +1066,16 @@ export async function handleAnthropicProxy(
       });
     }
 
+    // Skip AIP for upstream error responses (e.g. 401 from invalid API keys)
+    if (!response.ok) {
+      responseHeaders.set('X-AIP-Verdict', 'skipped');
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders,
+      });
+    }
+
     // Buffer the full response for analysis
     const responseBodyText = await response.text();
 
