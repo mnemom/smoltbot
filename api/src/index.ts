@@ -20,6 +20,7 @@
  * - GET /v1/ssm/:agent_id/timeline - Get similarity timeline data
  * - POST /v1/agents/:id/link - Link claimed agent to authenticated user
  * - GET /v1/auth/me - Get authenticated user info and linked agents
+ * - DELETE /v1/auth/delete-account - Delete authenticated user's account and unlink agents
  * - GET /v1/agents/:id/integrity/aip - AIP integrity score
  * - GET /v1/agents/:id/checkpoints - Paginated integrity checkpoints
  * - GET /v1/agents/:id/checkpoints/:checkpoint_id - Single checkpoint
@@ -1455,6 +1456,44 @@ async function handleGetMe(env: Env, request: Request): Promise<Response> {
     email: user.email,
     agents: agents || [],
   });
+}
+
+async function handleDeleteAccount(env: Env, request: Request): Promise<Response> {
+  const user = await getAuthUser(request, env);
+  if (!user) {
+    return errorResponse('Authentication required', 401);
+  }
+
+  // Unlink all agents owned by this user
+  const { error: unlinkError } = await supabaseUpdate(
+    env,
+    'agents',
+    { user_id: user.sub },
+    { user_id: null, email: null },
+  );
+
+  if (unlinkError) {
+    return errorResponse(`Failed to unlink agents: ${unlinkError}`, 500);
+  }
+
+  // Delete the auth user via Supabase Admin API
+  const deleteRes = await fetch(
+    `${env.SUPABASE_URL}/auth/v1/admin/users/${user.sub}`,
+    {
+      method: 'DELETE',
+      headers: {
+        'apikey': env.SUPABASE_KEY,
+        'Authorization': `Bearer ${env.SUPABASE_KEY}`,
+      },
+    },
+  );
+
+  if (!deleteRes.ok) {
+    const body = await deleteRes.text();
+    return errorResponse(`Failed to delete user: ${body}`, 500);
+  }
+
+  return jsonResponse({ success: true });
 }
 
 // ============================================
@@ -2992,6 +3031,11 @@ export default {
       // GET /v1/auth/me
       if (path === '/v1/auth/me' && method === 'GET') {
         return handleGetMe(env, request);
+      }
+
+      // DELETE /v1/auth/delete-account
+      if (path === '/v1/auth/delete-account' && method === 'DELETE') {
+        return handleDeleteAccount(env, request);
       }
 
       // GET /v1/agents/:id
