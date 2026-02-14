@@ -478,7 +478,7 @@ describe('handleAnthropicProxy', () => {
     await handleAnthropicProxy(request, env, ctx);
 
     const forwardCall = mockFetch.mock.calls[1];
-    expect(forwardCall[0].url).toBe(`${env.CF_AI_GATEWAY_URL}/v1/messages`);
+    expect(forwardCall[0].url).toBe(`${env.CF_AI_GATEWAY_URL}/anthropic/v1/messages`);
   });
 
   it('should add cf-aig-metadata header to forwarded request', async () => {
