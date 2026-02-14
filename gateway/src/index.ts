@@ -1353,8 +1353,12 @@ export async function handleProviderProxy(
 
       // Call analysis LLM (Haiku)
       const analysisStartTime = Date.now();
-      const analysisResponseText = await callAnalysisLLM(prompt.system, prompt.user, env);
+      const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
       const analysisDurationMs = Date.now() - analysisStartTime;
+
+      // Strip markdown code fences if present (claude-haiku-4-5 wraps JSON in ```json...```)
+      const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
+      const analysisResponseText = jsonMatch ? jsonMatch[0] : rawAnalysisResponse;
 
       // Hash thinking block using Web Crypto API
       const thinkingHash = await sha256(thinking.content);
