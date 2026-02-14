@@ -1182,9 +1182,12 @@ export async function handleProviderProxy(
     }
 
     // Build the forwarding URL — strip provider prefix, forward to CF AI Gateway
+    // CF AI Gateway requires provider in URL: .../gateway_name/provider/api_path
+    // Strip any trailing provider from base URL, then add the correct one
     const url = new URL(request.url);
     const path = url.pathname.replace(new RegExp(`^/${provider}`), '');
-    const forwardUrl = `${env.CF_AI_GATEWAY_URL}${path}${url.search}`;
+    const baseGatewayUrl = env.CF_AI_GATEWAY_URL.replace(/\/(anthropic|openai|gemini)\/?$/, '');
+    const forwardUrl = `${baseGatewayUrl}/${provider}${path}${url.search}`;
 
     // Clone headers and add metadata + AI Gateway auth
     const forwardHeaders = new Headers(request.headers);
