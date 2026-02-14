@@ -1759,13 +1759,13 @@ async function handleGetCheckpoints(env: Env, agentId: string, url: URL): Promis
     return errorResponse('Agent ID is required', 400);
   }
 
-  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 100);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '20', 10), 1000);
   const offset = parseInt(url.searchParams.get('offset') || '0', 10);
   const verdict = url.searchParams.get('verdict');
   const sessionId = url.searchParams.get('session_id');
 
   if (isNaN(limit) || limit < 1) {
-    return errorResponse('Invalid limit parameter (must be 1-100)', 400);
+    return errorResponse('Invalid limit parameter (must be 1-1000)', 400);
   }
 
   if (isNaN(offset) || offset < 0) {
