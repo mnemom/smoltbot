@@ -1140,11 +1140,10 @@ Guidelines:
     console.error('[observer] Haiku analysis failed:', error);
 
     // Return fallback with whatever context we have
+    // IMPORTANT: Never use responseText in fallback — that's the agent's actual output (PII)
     const fallbackReasoning = context.toolCalls.length > 0
       ? `Used tools: ${context.toolCalls.map((t) => t.name).join(', ')}`
-      : context.responseText
-        ? context.responseText.substring(0, 100)
-        : 'Analysis failed — reasoning could not be structured';
+      : 'Analysis unavailable — reasoning could not be extracted';
 
     return {
       alternatives: [{ id: 'analyzed', description: 'Analysis attempted but extraction failed' }],
@@ -1337,7 +1336,10 @@ async function runIntegrityCheck(
 
   try {
     const analysisApiKey = env.ANALYSIS_API_KEY || env.ANTHROPIC_API_KEY;
-    const analysisBaseUrl = env.CF_AI_GATEWAY_URL || 'https://api.anthropic.com';
+    // Analysis always uses Anthropic Haiku — ensure correct provider path in CF AI Gateway URL
+    const analysisBaseUrl = env.CF_AI_GATEWAY_URL
+      ? `${env.CF_AI_GATEWAY_URL.replace(/\/(anthropic|openai|gemini)\/?$/, '')}/anthropic`
+      : 'https://api.anthropic.com';
 
     // Map AAP AlignmentCard fields to AIP's card interface
     // Include value definitions and agent description for analysis context (PII-safe)
