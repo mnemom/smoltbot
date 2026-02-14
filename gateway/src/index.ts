@@ -2,7 +2,7 @@
  * Smoltbot Gateway Worker
  *
  * The heart of the Smoltbot system - a Cloudflare Worker that:
- * 1. Intercepts API requests to Anthropic
+ * 1. Intercepts API requests to Anthropic, OpenAI, and Gemini
  * 2. Identifies agents via API key hashing (zero-config)
  * 3. Attaches metadata for tracing via CF AI Gateway
  * 4. Forwards requests and returns responses transparently
@@ -37,6 +37,8 @@ import { createWorkersExporter } from '@mnemom/aip-otel-exporter/workers';
 // Types
 // ============================================================================
 
+type GatewayProvider = 'anthropic' | 'openai' | 'gemini';
+
 export interface Env {
   SUPABASE_URL: string;
   SUPABASE_KEY: string;
@@ -47,6 +49,8 @@ export interface Env {
   AIP_ENABLED: string;        // Feature flag ("true"/"false"), default "true"
   OTLP_ENDPOINT?: string;
   OTLP_AUTH?: string;
+  OPENAI_API_KEY?: string;
+  GEMINI_API_KEY?: string;
 }
 
 interface Agent {
@@ -534,6 +538,33 @@ function injectNudgeIntoSystem(
 }
 
 /**
+ * Inject nudge text into the request body in a provider-appropriate way.
+ * - Anthropic: inject into system parameter
+ * - OpenAI: prepend as a system message in the messages array
+ * - Gemini: no-op (format differs, skipped for now)
+ */
+function injectNudgeForProvider(
+  requestBody: Record<string, any>,
+  nudgeText: string,
+  provider: GatewayProvider
+): void {
+  switch (provider) {
+    case 'anthropic':
+      injectNudgeIntoSystem(requestBody, nudgeText);
+      break;
+    case 'openai':
+      if (!requestBody.messages) {
+        requestBody.messages = [];
+      }
+      requestBody.messages.unshift({ role: 'system', content: nudgeText });
+      break;
+    case 'gemini':
+      // No-op for now — Gemini format differs
+      break;
+  }
+}
+
+/**
  * Query pending nudges for an agent and inject them into the request body.
  * Returns the IDs of injected nudges (for later marking as delivered).
  * Fail-open: errors logged, request proceeds unmodified.
@@ -542,7 +573,8 @@ async function injectPendingNudges(
   requestBody: Record<string, any>,
   agentId: string,
   enforcementMode: string,
-  env: Env
+  env: Env,
+  provider: GatewayProvider = 'anthropic'
 ): Promise<string[]> {
   if (enforcementMode !== 'nudge' && enforcementMode !== 'enforce') {
     return [];
@@ -574,8 +606,8 @@ async function injectPendingNudges(
     if (nudges.length === 0) return [];
 
     const nudgeText = buildNudgeText(nudges);
-    injectNudgeIntoSystem(requestBody, nudgeText);
-    console.log(`[gateway/nudge] Injected ${nudges.length} nudge(s) for ${agentId}`);
+    injectNudgeForProvider(requestBody, nudgeText, provider);
+    console.log(`[gateway/nudge] Injected ${nudges.length} nudge(s) for ${agentId} (provider: ${provider})`);
 
     return nudges.map((n) => n.id);
   } catch (error) {
@@ -947,28 +979,141 @@ export function handleHealthCheck(env: Env): Response {
 }
 
 // ============================================================================
-// Anthropic Proxy Handler (Waves 1, 2, 3, 4)
+// Models Endpoint
 // ============================================================================
 
 /**
- * Handle Anthropic API proxy requests.
+ * Handle the /models.json endpoint.
+ * Returns a static model registry as JSON.
+ */
+function handleModelsEndpoint(env: Env): Response {
+  const models = {
+    anthropic: [
+      { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', thinking: true },
+      { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', thinking: true },
+      { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', thinking: true },
+      { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', thinking: false },
+    ],
+    openai: [
+      { id: 'gpt-5', name: 'GPT-5', thinking: true },
+      { id: 'gpt-5-mini', name: 'GPT-5 Mini', thinking: true },
+      { id: 'gpt-4o', name: 'GPT-4o', thinking: false },
+      { id: 'o3', name: 'o3', thinking: true },
+      { id: 'o3-mini', name: 'o3 Mini', thinking: true },
+    ],
+    gemini: [
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', thinking: true },
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', thinking: true },
+      { id: 'gemini-3-pro', name: 'Gemini 3 Pro', thinking: true },
+      { id: 'gemini-3-flash', name: 'Gemini 3 Flash', thinking: true },
+    ],
+  };
+
+  return new Response(JSON.stringify(models), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'public, max-age=3600',
+    },
+  });
+}
+
+// ============================================================================
+// Multi-Provider Proxy Handler (Waves 1, 2, 3, 4)
+// ============================================================================
+
+/**
+ * Extract API key from the request based on provider conventions.
+ * - Anthropic: x-api-key header
+ * - OpenAI: Authorization: Bearer <key> header
+ * - Gemini: x-goog-api-key header
+ */
+function extractApiKey(request: Request, provider: GatewayProvider): string | null {
+  switch (provider) {
+    case 'anthropic':
+      return request.headers.get('x-api-key');
+    case 'openai': {
+      const authHeader = request.headers.get('authorization');
+      if (!authHeader) return null;
+      const match = authHeader.match(/^Bearer\s+(.+)$/i);
+      return match ? match[1] : null;
+    }
+    case 'gemini':
+      return request.headers.get('x-goog-api-key');
+  }
+}
+
+/**
+ * Inject thinking/reasoning configuration into the request body
+ * based on the provider. (Wave 1)
  *
- * Wave 1: Extended thinking injection
+ * - Anthropic: thinking.type = 'enabled', budget_tokens = 10000
+ * - OpenAI: reasoning_effort = 'medium' (for GPT-5 models)
+ * - Gemini 2.5: thinkingBudget + includeThoughts
+ * - Gemini 3: thinkingLevel = 'HIGH'
+ */
+function injectThinkingForProvider(
+  requestBody: Record<string, any>,
+  provider: GatewayProvider
+): void {
+  switch (provider) {
+    case 'anthropic':
+      if (!requestBody.thinking) {
+        requestBody.thinking = { type: 'enabled', budget_tokens: 10000 };
+      }
+      break;
+    case 'openai': {
+      const model = requestBody.model || '';
+      if (typeof model === 'string' && model.includes('gpt-5')) {
+        if (!requestBody.reasoning_effort) {
+          requestBody.reasoning_effort = 'medium';
+        }
+      }
+      break;
+    }
+    case 'gemini': {
+      const model = requestBody.model || '';
+      if (typeof model === 'string' && model.includes('gemini-3')) {
+        // Gemini 3: use thinkingLevel
+        requestBody.generationConfig = {
+          ...requestBody.generationConfig,
+          thinkingConfig: { thinkingLevel: 'HIGH' },
+        };
+      } else {
+        // Gemini 2.5 and other versions: use thinkingBudget
+        requestBody.generationConfig = {
+          ...requestBody.generationConfig,
+          thinkingConfig: { thinkingBudget: 16384, includeThoughts: true },
+        };
+      }
+      break;
+    }
+  }
+}
+
+/**
+ * Handle provider API proxy requests (multi-provider).
+ *
+ * Wave 1: Thinking injection (provider-specific)
  * Wave 2: Real-time AIP integrity checking
- * Wave 3: Conscience nudge injection (pre-forward)
+ * Wave 3: Conscience nudge injection (pre-forward, provider-specific)
  * Wave 4: Webhook delivery for integrity events
  */
-export async function handleAnthropicProxy(
+export async function handleProviderProxy(
   request: Request,
   env: Env,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  provider: GatewayProvider
 ): Promise<Response> {
-  // Extract API key from header
-  const apiKey = request.headers.get('x-api-key');
+  // Extract API key from header (provider-specific)
+  const apiKey = extractApiKey(request, provider);
   if (!apiKey) {
+    const headerName = provider === 'anthropic' ? 'x-api-key'
+      : provider === 'openai' ? 'Authorization: Bearer <key>'
+      : 'x-goog-api-key';
     return new Response(
       JSON.stringify({
-        error: 'Missing x-api-key header',
+        error: `Missing ${headerName} header`,
         type: 'authentication_error',
       }),
       {
@@ -999,7 +1144,7 @@ export async function handleAnthropicProxy(
     );
 
     // ====================================================================
-    // Wave 1: Extended thinking injection
+    // Wave 1: Thinking injection (provider-specific)
     // ====================================================================
 
     // Clone and parse request body for potential modification
@@ -1011,13 +1156,13 @@ export async function handleAnthropicProxy(
     try {
       requestBody = JSON.parse(originalBody);
 
-      // Inject extended thinking if not already set
-      if (requestBody && !requestBody.thinking) {
-        requestBody.thinking = { type: 'enabled', budget_tokens: 10000 };
+      // Inject thinking configuration based on provider
+      if (requestBody) {
+        injectThinkingForProvider(requestBody, provider);
       }
 
       // ====================================================================
-      // Wave 3: Conscience nudge injection (pre-forward)
+      // Wave 3: Conscience nudge injection (pre-forward, provider-specific)
       // ====================================================================
       const agentEnforcementMode = agent.aip_enforcement_mode || 'observe';
       if (requestBody) {
@@ -1025,19 +1170,20 @@ export async function handleAnthropicProxy(
           requestBody,
           agent.id,
           agentEnforcementMode,
-          env
+          env,
+          provider
         );
       }
 
       modifiedBody = JSON.stringify(requestBody);
     } catch {
       // Body is not valid JSON — forward as-is
-      console.warn('[gateway] Request body is not valid JSON, forwarding as-is');
+      console.warn(`[gateway] Request body is not valid JSON, forwarding as-is (provider: ${provider})`);
     }
 
-    // Build the forwarding URL
+    // Build the forwarding URL — strip provider prefix, forward to CF AI Gateway
     const url = new URL(request.url);
-    const path = url.pathname.replace(/^\/anthropic/, '');
+    const path = url.pathname.replace(new RegExp(`^/${provider}`), '');
     const forwardUrl = `${env.CF_AI_GATEWAY_URL}${path}${url.search}`;
 
     // Clone headers and add metadata + AI Gateway auth
@@ -1150,14 +1296,14 @@ export async function handleAnthropicProxy(
         window.push(cp);
       }
 
-      // Extract thinking block from response using Anthropic adapter
+      // Extract thinking block from response using provider adapter
       const registry = createAdapterRegistry();
-      const adapter = registry.get('anthropic');
+      const adapter = registry.get(provider);
       const thinking = adapter.extractThinking(responseBodyText);
 
       // If no thinking block found, forward with clear verdict
       if (!thinking) {
-        console.log('[gateway/aip] No thinking block found in response');
+        console.log(`[gateway/aip] No thinking block found in response (provider: ${provider})`);
         responseHeaders.set('X-AIP-Verdict', 'clear');
         responseHeaders.set('X-AIP-Synthetic', 'true');
         return new Response(responseBodyText, {
@@ -1340,6 +1486,22 @@ export async function handleAnthropicProxy(
 }
 
 // ============================================================================
+// Anthropic Proxy Handler (backward-compat wrapper)
+// ============================================================================
+
+/**
+ * Handle Anthropic API proxy requests.
+ * Thin backward-compatibility wrapper around handleProviderProxy.
+ */
+export async function handleAnthropicProxy(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<Response> {
+  return handleProviderProxy(request, env, ctx, 'anthropic');
+}
+
+// ============================================================================
 // Main Request Handler
 // ============================================================================
 
@@ -1359,7 +1521,7 @@ export default {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, x-api-key, anthropic-version, anthropic-beta',
+          'Access-Control-Allow-Headers': 'Content-Type, x-api-key, anthropic-version, anthropic-beta, authorization, x-goog-api-key',
           'Access-Control-Expose-Headers': 'x-smoltbot-agent, x-smoltbot-session, X-AIP-Verdict, X-AIP-Checkpoint-Id, X-AIP-Action, X-AIP-Proceed, X-AIP-Synthetic',
           'Access-Control-Max-Age': '86400',
         },
@@ -1371,9 +1533,24 @@ export default {
       return handleHealthCheck(env);
     }
 
+    // Models endpoint
+    if (path === '/models.json') {
+      return handleModelsEndpoint(env);
+    }
+
     // Anthropic API proxy
     if (path.startsWith('/anthropic/') || path === '/anthropic') {
-      return handleAnthropicProxy(request, env, ctx);
+      return handleProviderProxy(request, env, ctx, 'anthropic');
+    }
+
+    // OpenAI API proxy
+    if (path.startsWith('/openai/') || path === '/openai') {
+      return handleProviderProxy(request, env, ctx, 'openai');
+    }
+
+    // Gemini API proxy
+    if (path.startsWith('/gemini/') || path === '/gemini') {
+      return handleProviderProxy(request, env, ctx, 'gemini');
     }
 
     // 404 for all other paths
@@ -1381,7 +1558,7 @@ export default {
       JSON.stringify({
         error: 'Not found',
         type: 'not_found',
-        message: 'This gateway only handles /health and /anthropic/* endpoints',
+        message: 'This gateway handles /health, /anthropic/*, /openai/*, and /gemini/* endpoints',
       }),
       {
         status: 404,

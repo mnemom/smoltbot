@@ -297,10 +297,10 @@ async function processLog(
   // CF AI Gateway stores streamed responses with content flattened to a string
   // and raw SSE events in streamed_data[]. Reconstruct SSE format so the AIP
   // SDK's extractThinkingFromStream() can find thinking blocks.
-  bodies.response = reconstructResponseForAIP(bodies.response);
+  bodies.response = reconstructResponseForAIP(bodies.response, log.provider);
 
   // Extract thinking, tool calls, user query, response text
-  const context = extractContext(bodies.request, bodies.response);
+  const context = extractContext(bodies.request, bodies.response, log.provider);
 
   console.log(
     `[observer] Extracted: thinking=${!!context.thinking}, tools=${context.toolCalls.length}, query=${!!context.userQuery}`
@@ -571,7 +571,13 @@ async function deleteLog(logId: string, env: Env): Promise<void> {
  * This function detects the CF gateway format and reconstructs SSE text
  * from streamed_data so extractThinkingFromStream() can parse it.
  */
-function reconstructResponseForAIP(responseBody: string): string {
+function reconstructResponseForAIP(responseBody: string, provider?: string): string {
+  // Only reconstruct for Anthropic responses — other providers are handled
+  // natively by the AIP SDK adapters, so return their responses as-is.
+  if (provider === 'openai' || provider === 'gemini') {
+    return responseBody;
+  }
+
   if (!responseBody) return responseBody;
 
   let parsed: Record<string, unknown>;
@@ -607,8 +613,9 @@ function reconstructResponseForAIP(responseBody: string): string {
 /**
  * Extract thinking, tool calls, user query, and response text from
  * raw request/response bodies. Handles both JSON and SSE streaming formats.
+ * Routes to provider-specific parsers based on the provider field from CF AI Gateway.
  */
-function extractContext(requestBody: string, responseBody: string): ExtractedContext {
+function extractContext(requestBody: string, responseBody: string, provider?: string): ExtractedContext {
   const result: ExtractedContext = {
     thinking: null,
     toolCalls: [],
@@ -616,9 +623,17 @@ function extractContext(requestBody: string, responseBody: string): ExtractedCon
     responseText: null,
   };
 
-  // --- Parse response (try JSON first, then SSE) ---
+  // --- Parse response (route to provider-specific parser) ---
   if (responseBody) {
-    const parsed = tryParseResponseJSON(responseBody) || tryParseSSE(responseBody);
+    let parsed = null;
+    if (provider === 'openai') {
+      parsed = tryParseOpenAIJSON(responseBody) || tryParseOpenAISSE(responseBody);
+    } else if (provider === 'gemini') {
+      parsed = tryParseGeminiJSON(responseBody);
+    } else {
+      // Anthropic (default)
+      parsed = tryParseResponseJSON(responseBody) || tryParseSSE(responseBody);
+    }
     if (parsed) {
       result.thinking = parsed.thinking;
       result.toolCalls = parsed.toolCalls;
@@ -628,7 +643,7 @@ function extractContext(requestBody: string, responseBody: string): ExtractedCon
 
   // --- Parse request for user query ---
   if (requestBody) {
-    result.userQuery = extractUserQuery(requestBody);
+    result.userQuery = extractUserQuery(requestBody, provider);
   }
 
   return result;
@@ -668,6 +683,94 @@ function tryParseResponseJSON(
     }
 
     return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Try to parse response as OpenAI JSON format (non-streaming).
+ * OpenAI responses have choices[].message with content, reasoning_content, and tool_calls.
+ */
+function tryParseOpenAIJSON(
+  body: string
+): { thinking: string | null; toolCalls: ExtractedContext['toolCalls']; responseText: string | null } | null {
+  try {
+    const response = JSON.parse(body);
+    const choices = response.choices;
+    if (!Array.isArray(choices) || choices.length === 0) return null;
+
+    const message = choices[0].message;
+    if (!message) return null;
+
+    const responseText = typeof message.content === 'string' && message.content.length > 0
+      ? message.content.substring(0, 3000)
+      : null;
+
+    const thinking = typeof message.reasoning_content === 'string' && message.reasoning_content.length > 0
+      ? message.reasoning_content
+      : null;
+
+    // Extract tool calls: tool_calls[] with {function: {name, arguments}}
+    const toolCalls: ExtractedContext['toolCalls'] = [];
+    if (Array.isArray(message.tool_calls)) {
+      for (const tc of message.tool_calls) {
+        if (tc.function?.name) {
+          let input: Record<string, unknown> = {};
+          try {
+            input = JSON.parse(tc.function.arguments || '{}');
+          } catch { /* */ }
+          toolCalls.push({ name: tc.function.name, input });
+        }
+      }
+    }
+
+    return { thinking, toolCalls, responseText };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Try to parse response as Gemini JSON format (non-streaming).
+ * Gemini responses have candidates[].content.parts[] with text and optional thought flag.
+ */
+function tryParseGeminiJSON(
+  body: string
+): { thinking: string | null; toolCalls: ExtractedContext['toolCalls']; responseText: string | null } | null {
+  try {
+    const response = JSON.parse(body);
+    const candidates = response.candidates;
+    if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+    const content = candidates[0].content;
+    if (!content || !Array.isArray(content.parts)) return null;
+
+    const thinkingParts: string[] = [];
+    const textParts: string[] = [];
+    const toolCalls: ExtractedContext['toolCalls'] = [];
+
+    for (const part of content.parts) {
+      if (part.thought === true && typeof part.text === 'string') {
+        // Thinking part (Gemini marks thinking with thought: true)
+        thinkingParts.push(part.text);
+      } else if (typeof part.text === 'string') {
+        // Regular text part
+        textParts.push(part.text);
+      } else if (part.functionCall) {
+        // Tool call: {functionCall: {name, args}}
+        toolCalls.push({
+          name: part.functionCall.name,
+          input: (part.functionCall.args as Record<string, unknown>) || {},
+        });
+      }
+    }
+
+    return {
+      thinking: thinkingParts.length > 0 ? thinkingParts.join('\n\n---\n\n') : null,
+      toolCalls,
+      responseText: textParts.length > 0 ? textParts.join('\n\n').substring(0, 3000) : null,
+    };
   } catch {
     return null;
   }
@@ -748,6 +851,92 @@ function tryParseSSE(
 }
 
 /**
+ * Try to parse response as OpenAI SSE streaming events.
+ * OpenAI streaming format: data: {"choices":[{"delta":{"content":"...","reasoning_content":"..."}}]}
+ * Accumulates content and reasoning_content separately across chunks.
+ */
+function tryParseOpenAISSE(
+  body: string
+): { thinking: string | null; toolCalls: ExtractedContext['toolCalls']; responseText: string | null } | null {
+  if (!body.includes('data: ')) return null;
+
+  try {
+    let contentAccum = '';
+    let reasoningAccum = '';
+    // Track tool calls being streamed (by index)
+    const toolCallsMap: Map<number, { name: string; arguments: string }> = new Map();
+
+    const lines = body.split('\n');
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const jsonStr = line.slice(6).trim();
+      if (!jsonStr || jsonStr === '[DONE]') continue;
+
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(jsonStr);
+      } catch {
+        continue;
+      }
+
+      const choices = event.choices as Array<Record<string, unknown>> | undefined;
+      if (!Array.isArray(choices) || choices.length === 0) continue;
+
+      const delta = choices[0].delta as Record<string, unknown> | undefined;
+      if (!delta) continue;
+
+      if (typeof delta.content === 'string') {
+        contentAccum += delta.content;
+      }
+      if (typeof delta.reasoning_content === 'string') {
+        reasoningAccum += delta.reasoning_content;
+      }
+
+      // Stream tool calls: delta.tool_calls[]{index, function: {name?, arguments?}}
+      const deltaToolCalls = delta.tool_calls as Array<Record<string, unknown>> | undefined;
+      if (Array.isArray(deltaToolCalls)) {
+        for (const dtc of deltaToolCalls) {
+          const idx = (dtc.index as number) ?? 0;
+          const fn = dtc.function as Record<string, unknown> | undefined;
+          if (!fn) continue;
+          const existing = toolCallsMap.get(idx);
+          if (!existing) {
+            toolCallsMap.set(idx, {
+              name: (fn.name as string) || '',
+              arguments: (fn.arguments as string) || '',
+            });
+          } else {
+            if (fn.name) existing.name += fn.name as string;
+            if (fn.arguments) existing.arguments += fn.arguments as string;
+          }
+        }
+      }
+    }
+
+    if (contentAccum.length === 0 && reasoningAccum.length === 0 && toolCallsMap.size === 0) {
+      return null;
+    }
+
+    const toolCalls: ExtractedContext['toolCalls'] = [];
+    for (const tc of toolCallsMap.values()) {
+      if (tc.name) {
+        let input: Record<string, unknown> = {};
+        try { input = JSON.parse(tc.arguments || '{}'); } catch { /* */ }
+        toolCalls.push({ name: tc.name, input });
+      }
+    }
+
+    return {
+      thinking: reasoningAccum.length > 0 ? reasoningAccum : null,
+      toolCalls,
+      responseText: contentAccum.length > 0 ? contentAccum.substring(0, 3000) : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Extract thinking, tool calls, and text from parsed content blocks
  */
 function extractFromContentBlocks(
@@ -778,11 +967,38 @@ function extractFromContentBlocks(
 }
 
 /**
- * Extract the user's query from the request body
+ * Extract the user's query from the request body.
+ * Handles Anthropic/OpenAI format (messages array) and Gemini format (contents array).
  */
-function extractUserQuery(requestBody: string): string | null {
+function extractUserQuery(requestBody: string, provider?: string): string | null {
   try {
     const request = JSON.parse(requestBody);
+
+    // Gemini uses "contents" array with parts[].text
+    if (provider === 'gemini') {
+      const contents = request.contents;
+      if (!Array.isArray(contents)) return null;
+
+      // Walk backwards to find the last user message
+      for (let i = contents.length - 1; i >= 0; i--) {
+        const msg = contents[i] as Record<string, unknown>;
+        if (msg.role !== 'user') continue;
+
+        const parts = msg.parts as Array<Record<string, unknown>> | undefined;
+        if (!Array.isArray(parts)) continue;
+
+        const text = parts
+          .filter((p) => typeof p.text === 'string')
+          .map((p) => p.text as string)
+          .join('\n');
+        if (text.length > 0) {
+          return text.substring(0, 500);
+        }
+      }
+      return null;
+    }
+
+    // Anthropic and OpenAI both use "messages" array with role: 'user'
     const messages = request.messages;
     if (!Array.isArray(messages)) return null;
 

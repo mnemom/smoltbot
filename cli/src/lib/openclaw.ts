@@ -13,7 +13,46 @@ export const AUTH_PROFILES_FILE = path.join(
   "auth-profiles.json"
 );
 
-// Type definitions for OpenClaw config structures
+// ============================================================================
+// Provider Types
+// ============================================================================
+
+export type Provider = "anthropic" | "openai" | "gemini";
+
+export const PROVIDER_ROUTES: Record<
+  Provider,
+  { baseUrl: string; apiType: string }
+> = {
+  anthropic: {
+    baseUrl: "https://gateway.mnemom.ai/anthropic",
+    apiType: "anthropic-messages",
+  },
+  openai: {
+    baseUrl: "https://gateway.mnemom.ai/openai",
+    apiType: "openai-chat",
+  },
+  gemini: {
+    baseUrl: "https://gateway.mnemom.ai/gemini",
+    apiType: "gemini-messages",
+  },
+};
+
+/**
+ * Smoltbot provider key names in OpenClaw config.
+ * smoltbot -> Anthropic (backward compatible)
+ * smoltbot-openai -> OpenAI
+ * smoltbot-gemini -> Gemini
+ */
+export const PROVIDER_CONFIG_KEYS: Record<Provider, string> = {
+  anthropic: "smoltbot",
+  openai: "smoltbot-openai",
+  gemini: "smoltbot-gemini",
+};
+
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
 export interface AuthProfile {
   type: "api_key" | "oauth";
   provider: string;
@@ -30,6 +69,7 @@ export interface AuthProfilesFile {
 export interface ModelDefinition {
   id: string;
   name: string;
+  provider?: Provider;
   reasoning?: boolean;
   input?: string[];
   contextWindow?: number;
@@ -87,11 +127,58 @@ export interface OpenClawDetectionResult {
   isOAuth: boolean;
   apiKey?: string;
   currentModel?: string;
-  currentModelId?: string; // Just the model ID without provider prefix
-  currentProvider?: string; // The provider prefix (e.g., "anthropic" or "smoltbot")
+  currentModelId?: string;
+  currentProvider?: string;
   smoltbotAlreadyConfigured: boolean;
   error?: string;
 }
+
+export interface ProviderDetectionResult {
+  installed: boolean;
+  providers: Record<
+    Provider,
+    {
+      hasApiKey: boolean;
+      apiKey?: string;
+      isOAuth?: boolean;
+      invalidFormat?: boolean;
+    }
+  >;
+  currentModel?: string;
+  currentModelId?: string;
+  currentProvider?: string;
+  smoltbotConfiguredProviders: Provider[];
+  error?: string;
+}
+
+// ============================================================================
+// API Key Configuration per Provider
+// ============================================================================
+
+const PROVIDER_KEY_CONFIG: Record<
+  Provider,
+  { profileKey: string; profileProvider: string; validate: (key: string) => boolean }
+> = {
+  anthropic: {
+    profileKey: "anthropic:default",
+    profileProvider: "anthropic",
+    validate: (key: string) => key.startsWith("sk-ant-"),
+  },
+  openai: {
+    profileKey: "openai:default",
+    profileProvider: "openai",
+    validate: (key: string) => key.startsWith("sk-") && !key.startsWith("sk-ant-"),
+  },
+  gemini: {
+    profileKey: "google:default",
+    profileProvider: "google",
+    validate: (key: string) => key.startsWith("AIza"),
+  },
+};
+
+// ============================================================================
+// Core Functions
+// ============================================================================
 
 /**
  * Check if OpenClaw is installed
@@ -117,33 +204,51 @@ export function loadAuthProfiles(): AuthProfilesFile | null {
 }
 
 /**
- * Get the Anthropic API key from auth-profiles.json
+ * Get API key for a specific provider from auth-profiles.json.
  */
-export function getAnthropicApiKey(): { key: string | null; isOAuth: boolean; invalidFormat?: boolean } {
+export function getProviderApiKey(
+  provider: Provider
+): { key: string | null; isOAuth: boolean; invalidFormat?: boolean } {
   const profiles = loadAuthProfiles();
   if (!profiles) {
     return { key: null, isOAuth: false };
   }
 
-  // Look for anthropic:default or any anthropic profile
-  const anthropicProfile =
-    profiles.profiles["anthropic:default"] ||
-    Object.values(profiles.profiles).find((p) => p.provider === "anthropic");
+  const config = PROVIDER_KEY_CONFIG[provider];
 
-  if (!anthropicProfile) {
+  // Look for provider:default or any matching provider profile
+  const profile =
+    profiles.profiles[config.profileKey] ||
+    Object.values(profiles.profiles).find(
+      (p) => p.provider === config.profileProvider
+    );
+
+  if (!profile) {
     return { key: null, isOAuth: false };
   }
 
-  if (anthropicProfile.type === "oauth" || !anthropicProfile.key) {
+  if (profile.type === "oauth" || !profile.key) {
     return { key: null, isOAuth: true };
   }
 
-  // Validate key format — Anthropic API keys start with "sk-ant-"
-  if (!anthropicProfile.key.startsWith("sk-ant-")) {
+  // Validate key format
+  if (!config.validate(profile.key)) {
     return { key: null, isOAuth: false, invalidFormat: true };
   }
 
-  return { key: anthropicProfile.key, isOAuth: false };
+  return { key: profile.key, isOAuth: false };
+}
+
+/**
+ * Get the Anthropic API key from auth-profiles.json.
+ * Backward-compatible wrapper around getProviderApiKey().
+ */
+export function getAnthropicApiKey(): {
+  key: string | null;
+  isOAuth: boolean;
+  invalidFormat?: boolean;
+} {
+  return getProviderApiKey("anthropic");
 }
 
 /**
@@ -213,11 +318,30 @@ export function getCurrentModel(): {
 }
 
 /**
- * Check if smoltbot provider is already configured
+ * Check if smoltbot provider is already configured (any provider)
  */
 export function isSmoltbotConfigured(): boolean {
   const config = loadOpenClawConfig();
-  return !!config?.models?.providers?.smoltbot;
+  if (!config?.models?.providers) return false;
+  return Object.values(PROVIDER_CONFIG_KEYS).some(
+    (key) => !!config.models?.providers?.[key]
+  );
+}
+
+/**
+ * Get list of smoltbot-configured providers
+ */
+export function getSmoltbotConfiguredProviders(): Provider[] {
+  const config = loadOpenClawConfig();
+  if (!config?.models?.providers) return [];
+
+  const configured: Provider[] = [];
+  for (const [provider, key] of Object.entries(PROVIDER_CONFIG_KEYS)) {
+    if (config.models.providers[key]) {
+      configured.push(provider as Provider);
+    }
+  }
+  return configured;
 }
 
 /**
@@ -229,7 +353,7 @@ export function getSmoltbotProvider(): SmoltbotProvider | null {
 }
 
 /**
- * Comprehensive detection of OpenClaw setup
+ * Comprehensive detection of OpenClaw setup (backward compatible)
  */
 export function detectOpenClaw(): OpenClawDetectionResult {
   // Check if OpenClaw is installed
@@ -298,9 +422,67 @@ export function detectOpenClaw(): OpenClawDetectionResult {
 }
 
 /**
- * Configure the smoltbot provider in OpenClaw config
+ * Detect all available providers.
+ * Checks for API keys across Anthropic, OpenAI, and Gemini.
+ */
+export function detectProviders(): ProviderDetectionResult {
+  if (!openclawExists()) {
+    return {
+      installed: false,
+      providers: {
+        anthropic: { hasApiKey: false },
+        openai: { hasApiKey: false },
+        gemini: { hasApiKey: false },
+      },
+      smoltbotConfiguredProviders: [],
+      error: "OpenClaw is not installed. Install from https://openclaw.ai",
+    };
+  }
+
+  const providers: ProviderDetectionResult["providers"] = {
+    anthropic: { hasApiKey: false },
+    openai: { hasApiKey: false },
+    gemini: { hasApiKey: false },
+  };
+
+  for (const provider of ["anthropic", "openai", "gemini"] as Provider[]) {
+    const result = getProviderApiKey(provider);
+    providers[provider] = {
+      hasApiKey: !!result.key,
+      apiKey: result.key || undefined,
+      isOAuth: result.isOAuth || undefined,
+      invalidFormat: result.invalidFormat || undefined,
+    };
+  }
+
+  const { fullPath, provider: currentProvider, modelId } = getCurrentModel();
+
+  return {
+    installed: true,
+    providers,
+    currentModel: fullPath || undefined,
+    currentModelId: modelId || undefined,
+    currentProvider: currentProvider || undefined,
+    smoltbotConfiguredProviders: getSmoltbotConfiguredProviders(),
+  };
+}
+
+/**
+ * Configure the smoltbot provider in OpenClaw config.
+ * Backward-compatible — configures the Anthropic ("smoltbot") provider.
  */
 export function configureSmoltbotProvider(
+  apiKey: string,
+  models: ModelDefinition[]
+): void {
+  configureSmoltbotProviderForType("anthropic", apiKey, models);
+}
+
+/**
+ * Configure a smoltbot provider for a specific provider type.
+ */
+export function configureSmoltbotProviderForType(
+  provider: Provider,
   apiKey: string,
   models: ModelDefinition[]
 ): void {
@@ -322,15 +504,64 @@ export function configureSmoltbotProvider(
     config.models.mode = "merge";
   }
 
-  // Configure smoltbot provider
-  config.models.providers.smoltbot = {
-    baseUrl: "https://gateway.mnemom.ai/anthropic",
+  const route = PROVIDER_ROUTES[provider];
+  const configKey = PROVIDER_CONFIG_KEYS[provider];
+
+  config.models.providers[configKey] = {
+    baseUrl: route.baseUrl,
     apiKey: apiKey,
-    api: "anthropic-messages",
+    api: route.apiType,
     models: models,
   };
 
   saveOpenClawConfig(config);
+}
+
+/**
+ * Configure all available providers at once.
+ * Returns the list of providers that were configured.
+ */
+export function configureSmoltbotProviders(
+  providerKeys: Partial<Record<Provider, { apiKey: string; models: ModelDefinition[] }>>
+): Provider[] {
+  const config = loadOpenClawConfig();
+  if (!config) {
+    throw new Error("Could not load OpenClaw config");
+  }
+
+  // Ensure models section exists
+  if (!config.models) {
+    config.models = {};
+  }
+  if (!config.models.providers) {
+    config.models.providers = {};
+  }
+  if (!config.models.mode) {
+    config.models.mode = "merge";
+  }
+
+  const configured: Provider[] = [];
+
+  for (const [provider, data] of Object.entries(providerKeys) as [
+    Provider,
+    { apiKey: string; models: ModelDefinition[] },
+  ][]) {
+    if (!data) continue;
+    const route = PROVIDER_ROUTES[provider];
+    const configKey = PROVIDER_CONFIG_KEYS[provider];
+
+    config.models.providers[configKey] = {
+      baseUrl: route.baseUrl,
+      apiKey: data.apiKey,
+      api: route.apiType,
+      models: data.models,
+    };
+
+    configured.push(provider);
+  }
+
+  saveOpenClawConfig(config);
+  return configured;
 }
 
 /**
