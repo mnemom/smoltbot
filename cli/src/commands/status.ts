@@ -2,10 +2,15 @@ import { configExists, loadConfig } from "../lib/config.js";
 import { getAgent, getIntegrity, getTraces, API_BASE } from "../lib/api.js";
 import {
   detectOpenClaw,
+  detectProviders,
   getCurrentModel,
   getSmoltbotProvider,
+  getSmoltbotConfiguredProviders,
+  PROVIDER_CONFIG_KEYS,
+  type Provider,
 } from "../lib/openclaw.js";
-import { formatModelName } from "../lib/models.js";
+import { formatModelName, detectProvider } from "../lib/models.js";
+import { refreshModelCache } from "../lib/model-cache.js";
 
 const GATEWAY_URL = "https://gateway.mnemom.ai";
 const DASHBOARD_URL = "https://mnemom.ai";
@@ -16,6 +21,18 @@ interface StatusCheckResult {
   message: string;
   details?: string;
 }
+
+const PROVIDER_LABELS: Record<Provider, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  gemini: "Gemini",
+};
+
+const AIP_SUPPORT: Record<Provider, string> = {
+  anthropic: "Full (thinking blocks)",
+  openai: "Via reasoning summaries",
+  gemini: "Full (thought parts)",
+};
 
 export async function statusCommand(): Promise<void> {
   console.log("\n" + "=".repeat(60));
@@ -40,15 +57,19 @@ export async function statusCommand(): Promise<void> {
   const openclawCheck = checkOpenClawConfig();
   checks.push(openclawCheck);
 
-  // 3. Check current model
+  // 3. Check configured providers
+  const providerChecks = checkConfiguredProviders();
+  checks.push(...providerChecks);
+
+  // 4. Check current model
   const modelCheck = checkCurrentModel();
   checks.push(modelCheck);
 
-  // 4. Test gateway connectivity
+  // 5. Test gateway connectivity
   const gatewayCheck = await checkGatewayConnectivity();
   checks.push(gatewayCheck);
 
-  // 5. Test API connectivity
+  // 6. Test API connectivity
   const apiCheck = await checkApiConnectivity(config.agentId);
   checks.push(apiCheck);
 
@@ -75,13 +96,20 @@ export async function statusCommand(): Promise<void> {
     if (modelId) {
       console.log(`  (${formatModelName(modelId)})`);
     }
-    if (provider === "smoltbot") {
+    if (provider && (provider === "smoltbot" || provider.startsWith("smoltbot"))) {
       console.log("  Status: Traced mode ACTIVE");
     } else {
       console.log("  Status: Traced mode NOT ACTIVE");
-      console.log(`\n  To enable: openclaw models set smoltbot/${modelId}`);
+      if (modelId) {
+        const detectedProvider = detectProvider(modelId);
+        const configKey = detectedProvider ? PROVIDER_CONFIG_KEYS[detectedProvider] : "smoltbot";
+        console.log(`\n  To enable: openclaw models set ${configKey}/${modelId}`);
+      }
     }
   }
+
+  // Show provider summary
+  showProviderSummary();
 
   // Show trace summary if available
   if (apiCheck.status === "ok") {
@@ -102,6 +130,9 @@ export async function statusCommand(): Promise<void> {
     console.log("  Status: ALL SYSTEMS GO");
   }
   console.log("=".repeat(60) + "\n");
+
+  // Refresh model cache in background (non-blocking)
+  refreshModelCache().catch(() => {});
 }
 
 function checkSmoltbotConfig(): StatusCheckResult {
@@ -152,10 +183,22 @@ function checkOpenClawConfig(): StatusCheckResult {
         details: "smoltbot requires API key authentication",
       };
     }
+
+    // Check if any provider has a key (not just Anthropic)
+    const providerDetection = detectProviders();
+    const anyKey = Object.values(providerDetection.providers).some((p) => p.hasApiKey);
+    if (anyKey) {
+      return {
+        name: "OpenClaw",
+        status: "ok",
+        message: "API key(s) found",
+      };
+    }
+
     return {
       name: "OpenClaw",
       status: "error",
-      message: "No API key configured",
+      message: "No API keys configured",
       details: "Run `openclaw auth` to add your API key",
     };
   }
@@ -176,6 +219,38 @@ function checkOpenClawConfig(): StatusCheckResult {
   };
 }
 
+function checkConfiguredProviders(): StatusCheckResult[] {
+  const results: StatusCheckResult[] = [];
+  const providerDetection = detectProviders();
+
+  if (!providerDetection.installed) return results;
+
+  const configuredProviders = getSmoltbotConfiguredProviders();
+
+  for (const provider of ["anthropic", "openai", "gemini"] as Provider[]) {
+    const info = providerDetection.providers[provider];
+    const isConfigured = configuredProviders.includes(provider);
+
+    if (info.hasApiKey && isConfigured) {
+      results.push({
+        name: `${PROVIDER_LABELS[provider]}`,
+        status: "ok",
+        message: `Configured (AIP: ${AIP_SUPPORT[provider]})`,
+      });
+    } else if (info.hasApiKey && !isConfigured) {
+      results.push({
+        name: `${PROVIDER_LABELS[provider]}`,
+        status: "warning",
+        message: "API key found but not configured",
+        details: "Run `smoltbot init` to configure",
+      });
+    }
+    // Don't show providers without keys (too noisy)
+  }
+
+  return results;
+}
+
 function checkCurrentModel(): StatusCheckResult {
   const { fullPath, provider, modelId } = getCurrentModel();
 
@@ -188,7 +263,7 @@ function checkCurrentModel(): StatusCheckResult {
     };
   }
 
-  if (provider === "smoltbot") {
+  if (provider && (provider === "smoltbot" || provider.startsWith("smoltbot"))) {
     return {
       name: "Current Model",
       status: "ok",
@@ -202,6 +277,25 @@ function checkCurrentModel(): StatusCheckResult {
     message: `${fullPath} (not traced)`,
     details: `Switch with: openclaw models set smoltbot/${modelId}`,
   };
+}
+
+function showProviderSummary(): void {
+  const providerDetection = detectProviders();
+  if (!providerDetection.installed) return;
+
+  const configuredProviders = getSmoltbotConfiguredProviders();
+  if (configuredProviders.length === 0) return;
+
+  console.log("\n" + "─".repeat(50));
+  console.log("Configured Providers");
+  console.log("─".repeat(50) + "\n");
+
+  for (const provider of configuredProviders) {
+    const label = PROVIDER_LABELS[provider];
+    const aip = AIP_SUPPORT[provider];
+    const configKey = PROVIDER_CONFIG_KEYS[provider];
+    console.log(`  ${label}: ${configKey}/* (AIP: ${aip})`);
+  }
 }
 
 async function checkGatewayConnectivity(): Promise<StatusCheckResult> {
@@ -337,12 +431,6 @@ function printChecks(checks: StatusCheckResult[]): void {
   for (const check of checks) {
     const icon =
       check.status === "ok" ? "✓" : check.status === "warning" ? "⚠" : "✗";
-    const color =
-      check.status === "ok"
-        ? ""
-        : check.status === "warning"
-          ? ""
-          : "";
 
     console.log(`${icon} ${check.name}: ${check.message}`);
     if (check.details) {
