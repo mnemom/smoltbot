@@ -734,7 +734,7 @@ async function callAnalysisLLM(
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
         system,
         messages: [{ role: 'user', content: user }],
@@ -991,7 +991,7 @@ function handleModelsEndpoint(env: Env): Response {
     anthropic: [
       { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', thinking: true },
       { id: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', thinking: true },
-      { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku', thinking: true },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', thinking: true },
       { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus', thinking: false },
     ],
     openai: [
@@ -1379,7 +1379,7 @@ export async function handleProviderProxy(
           index: windowState.size,
           window_size: windowState.size + 1,
         },
-        analysisModel: 'claude-3-5-haiku-20241022',
+        analysisModel: 'claude-haiku-4-5-20251001',
         analysisDurationMs,
       });
 

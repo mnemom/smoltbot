@@ -69,7 +69,7 @@ function createMockAnalysisResponse(
     id: 'msg_mock_analysis',
     type: 'message',
     role: 'assistant',
-    model: 'claude-3-5-haiku-20241022',
+    model: 'claude-haiku-4-5-20251001',
     content: [
       {
         type: 'text',
@@ -299,7 +299,7 @@ describe('AIP Pipeline E2E', () => {
       card: aipCard,
       conscience_values: [],
       analysis_llm: {
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         base_url: mockEnv.CF_AI_GATEWAY_URL,
         api_key: mockEnv.ANALYSIS_API_KEY,
         max_tokens: 1024,
@@ -336,7 +336,7 @@ describe('AIP Pipeline E2E', () => {
 
     // Verify the request body includes the thinking block
     const body = JSON.parse(options.body);
-    expect(body.model).toBe('claude-3-5-haiku-20241022');
+    expect(body.model).toBe('claude-haiku-4-5-20251001');
     expect(body.messages[0].content).toContain('TypeScript generics');
 
     // Verify window state
@@ -364,7 +364,7 @@ describe('AIP Pipeline E2E', () => {
       card: aipCard,
       conscience_values: [],
       analysis_llm: {
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         base_url: 'https://api.anthropic.com',
         api_key: 'test-key',
         max_tokens: 1024,
@@ -407,7 +407,7 @@ describe('AIP Pipeline E2E', () => {
       card: aipCard,
       conscience_values: [],
       analysis_llm: {
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         base_url: 'https://api.anthropic.com',
         api_key: 'test-key',
         max_tokens: 1024,
@@ -439,7 +439,7 @@ describe('AIP Pipeline E2E', () => {
       card: aipCard,
       conscience_values: [],
       analysis_llm: {
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         base_url: 'https://api.anthropic.com',
         api_key: 'test-key',
         max_tokens: 1024,
@@ -483,7 +483,7 @@ describe('AIP Pipeline E2E', () => {
       card: aipCard,
       conscience_values: [],
       analysis_llm: {
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         base_url: 'https://api.anthropic.com',
         api_key: 'test-key',
         max_tokens: 1024,
@@ -523,7 +523,7 @@ describe('AIP Pipeline E2E', () => {
       card: aipCard,
       conscience_values: [],
       analysis_llm: {
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         base_url: 'https://api.anthropic.com',
         api_key: 'test-key',
         max_tokens: 1024,
@@ -631,7 +631,7 @@ describe('Checkpoint Submission', () => {
       },
       window_position: { index: 0, window_size: 1 },
       analysis_metadata: {
-        analysis_model: 'claude-3-5-haiku-20241022',
+        analysis_model: 'claude-haiku-4-5-20251001',
         analysis_duration_ms: 450,
         thinking_tokens_original: 120,
         thinking_tokens_analyzed: 120,
@@ -661,7 +661,7 @@ describe('Checkpoint Submission', () => {
     expect(body.thinking_block_hash).toBe('abc123def456');
     expect(body.concerns).toEqual([]);
     expect(body.conscience_context.values_checked).toContain('transparency');
-    expect(body.analysis_metadata.analysis_model).toBe('claude-3-5-haiku-20241022');
+    expect(body.analysis_metadata.analysis_model).toBe('claude-haiku-4-5-20251001');
     expect(body.linked_trace_id).toBeNull();
   });
 
@@ -693,7 +693,7 @@ describe('Checkpoint Submission', () => {
       },
       window_position: { index: 0, window_size: 1 },
       analysis_metadata: {
-        analysis_model: 'claude-3-5-haiku-20241022',
+        analysis_model: 'claude-haiku-4-5-20251001',
         analysis_duration_ms: 300,
         thinking_tokens_original: 50,
         thinking_tokens_analyzed: 50,
@@ -833,7 +833,7 @@ describe('AIP Drift Detection (multi-check)', () => {
       card: aipCard,
       conscience_values: [],
       analysis_llm: {
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         base_url: 'https://api.anthropic.com',
         api_key: 'test-key',
         max_tokens: 1024,

@@ -91,9 +91,9 @@ export const MODEL_REGISTRY: Record<Provider, Record<string, ModelDefinition>> =
       },
     },
 
-    "claude-3-5-haiku-20241022": {
-      id: "claude-3-5-haiku-20241022",
-      name: "Claude 3.5 Haiku",
+    "claude-haiku-4-5-20251001": {
+      id: "claude-haiku-4-5-20251001",
+      name: "Claude Haiku 4.5",
       provider: "anthropic",
       reasoning: false,
       input: ["text", "image"],
