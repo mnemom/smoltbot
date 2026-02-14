@@ -6,6 +6,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Proxy
+proxy/package-lock.json
+
 # Environment
 .env
 .env.local
