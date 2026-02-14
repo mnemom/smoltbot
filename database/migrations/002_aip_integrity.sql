@@ -89,11 +89,13 @@ DECLARE
   v_ratio         NUMERIC;
   v_latest        TEXT;
 BEGIN
+  -- Re-evaluated checkpoints (re_evaluated_at IS NOT NULL) are treated as
+  -- resolved: count them toward clear regardless of their stored verdict.
   SELECT
     COUNT(*),
-    COUNT(*) FILTER (WHERE verdict = 'clear'),
-    COUNT(*) FILTER (WHERE verdict = 'review_needed'),
-    COUNT(*) FILTER (WHERE verdict = 'boundary_violation')
+    COUNT(*) FILTER (WHERE verdict = 'clear' OR re_evaluated_at IS NOT NULL),
+    COUNT(*) FILTER (WHERE verdict = 'review_needed' AND re_evaluated_at IS NULL),
+    COUNT(*) FILTER (WHERE verdict = 'boundary_violation' AND re_evaluated_at IS NULL)
   INTO v_total, v_clear, v_review, v_violation
   FROM integrity_checkpoints
   WHERE agent_id = p_agent_id;
