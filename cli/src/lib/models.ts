@@ -91,22 +91,6 @@ export const MODEL_REGISTRY: Record<Provider, Record<string, ModelDefinition>> =
       },
     },
 
-    "claude-haiku-4-5-20251001": {
-      id: "claude-haiku-4-5-20251001",
-      name: "Claude Haiku 4.5",
-      provider: "anthropic",
-      reasoning: false,
-      input: ["text", "image"],
-      contextWindow: 200000,
-      maxTokens: 8192,
-      cost: {
-        input: 0.8,
-        output: 4,
-        cacheRead: 0.08,
-        cacheWrite: 1,
-      },
-    },
-
     // Claude 3 Opus (legacy)
     "claude-3-opus-20240229": {
       id: "claude-3-opus-20240229",
