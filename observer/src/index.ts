@@ -1083,7 +1083,7 @@ async function analyzeWithHaiku(
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
         messages: [
           {
@@ -1374,7 +1374,7 @@ async function runIntegrityCheck(
       conscience_values: [...DEFAULT_CONSCIENCE_VALUES],
       initial_checkpoints: initialCheckpoints,
       analysis_llm: {
-        model: 'claude-3-5-haiku-20241022',
+        model: 'claude-haiku-4-5-20251001',
         base_url: analysisBaseUrl,
         api_key: analysisApiKey,
         max_tokens: 1024,

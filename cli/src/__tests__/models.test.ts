@@ -42,7 +42,7 @@ describe("models", () => {
 
     it("should contain legacy models", () => {
       expect(ANTHROPIC_MODELS["claude-3-5-sonnet-20241022"]).toBeDefined();
-      expect(ANTHROPIC_MODELS["claude-3-5-haiku-20241022"]).toBeDefined();
+      expect(ANTHROPIC_MODELS["claude-haiku-4-5-20251001"]).toBeDefined();
       expect(ANTHROPIC_MODELS["claude-3-opus-20240229"]).toBeDefined();
       expect(ANTHROPIC_MODELS["claude-3-haiku-20240307"]).toBeDefined();
     });
