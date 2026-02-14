@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@mnemom/agent-alignment-protocol": "^0.1.8",
-    "@mnemom/agent-integrity-protocol": "^0.1.4",
+    "@mnemom/agent-integrity-protocol": "file:../../aip/packages/typescript/mnemom-agent-integrity-protocol-0.1.6.tgz",
     "@mnemom/aip-otel-exporter": "^0.1.0"
   },
   "devDependencies": {
