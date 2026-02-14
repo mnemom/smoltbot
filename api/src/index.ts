@@ -1713,7 +1713,7 @@ async function handleGetAipIntegrity(env: Env, agentId: string): Promise<Respons
   // Manual calculation from integrity_checkpoints table
   const { data: checkpoints, error } = await supabaseQuery(env, 'integrity_checkpoints', {
     filters: { agent_id: agentId },
-    select: 'checkpoint_id,verdict,timestamp',
+    select: 'checkpoint_id,verdict,timestamp,re_evaluated_at',
   });
 
   if (error) {
@@ -1724,12 +1724,14 @@ async function handleGetAipIntegrity(env: Env, agentId: string): Promise<Respons
     checkpoint_id: string;
     verdict: string;
     timestamp: string;
+    re_evaluated_at: string | null;
   }>;
 
   const totalChecks = checkpointList.length;
   const clearCount = checkpointList.filter(c => c.verdict === 'clear').length;
-  const reviewCount = checkpointList.filter(c => c.verdict === 'review_needed').length;
-  const violationCount = checkpointList.filter(c => c.verdict === 'boundary_violation').length;
+  // Resolved checkpoints (re_evaluated_at set) should not count as active reviews/violations
+  const reviewCount = checkpointList.filter(c => c.verdict === 'review_needed' && !c.re_evaluated_at).length;
+  const violationCount = checkpointList.filter(c => c.verdict === 'boundary_violation' && !c.re_evaluated_at).length;
   const integrityRatio = totalChecks > 0 ? Math.round((clearCount / totalChecks) * 1000) / 1000 : 0;
 
   // Find the latest verdict by timestamp
@@ -1888,7 +1890,7 @@ async function handleGetTimeline(env: Env, agentId: string, url: URL): Promise<R
   ] = await Promise.all([
     supabaseQuery(env, 'integrity_checkpoints', {
       filters: { agent_id: agentId },
-      select: 'checkpoint_id,timestamp,verdict,concerns,reasoning_summary,session_id,linked_trace_id',
+      select: 'checkpoint_id,timestamp,verdict,concerns,reasoning_summary,session_id,linked_trace_id,re_evaluated_at,original_verdict',
       order: { column: 'timestamp', ascending: false },
       limit,
     }),
