@@ -29,10 +29,20 @@ That's it. `smoltbot init` configures your local environment to route API calls 
 | `smoltbot integrity` | Display integrity score and verification stats |
 | `smoltbot logs [-l N]` | Show recent traces and actions |
 
+## Supported Providers
+
+| Provider | Models | Thinking/AIP | Auth |
+|----------|--------|-------------|------|
+| Anthropic | Claude Opus 4.6, Opus 4.5, Sonnet 4.5 | Full (thinking blocks) | `x-api-key` |
+| OpenAI | GPT-5.2, GPT-5.2 Pro, GPT-5 | Via reasoning summaries | `Authorization: Bearer` |
+| Gemini | Gemini 2.5 Pro, Gemini 3 Pro | Full (thought parts) | `x-goog-api-key` |
+
 ## How It Works
 
 ```
-Your App → smoltbot gateway → AI Provider (Anthropic, etc.)
+                    ┌─── /anthropic/* ──→ Anthropic (Claude)
+Your App → smoltbot ├─── /openai/*    ──→ OpenAI (GPT-5)
+           gateway  └─── /gemini/*    ──→ Google (Gemini)
                 ↓
            CF AI Gateway
                 ↓
@@ -43,9 +53,9 @@ Your App → smoltbot gateway → AI Provider (Anthropic, etc.)
          Dashboard (mnemom.ai)
 ```
 
-1. **Gateway** — A Cloudflare Worker that intercepts API requests. It identifies your agent via API key hash (zero-config), attaches tracing metadata, injects extended thinking (Wave 1), performs real-time integrity checking (Wave 2), injects conscience nudges (Wave 3), and delivers webhooks (Wave 4). Your prompts and responses pass through unchanged.
+1. **Gateway** — A Cloudflare Worker that intercepts API requests to Anthropic, OpenAI, and Gemini. It identifies your agent via API key hash (zero-config), attaches tracing metadata, injects thinking/reasoning per provider (Wave 1), performs real-time integrity checking (Wave 2), injects conscience nudges (Wave 3), and delivers webhooks (Wave 4). Your prompts and responses pass through unchanged.
 
-2. **Observer** — A scheduled Cloudflare Worker that processes AI Gateway logs. It extracts thinking blocks and tool calls from responses, analyzes decisions with Claude Haiku, builds [AP-Traces](https://github.com/mnemom/aap), verifies them against your agent's alignment card using the AAP SDK, and runs [AIP](https://github.com/mnemom/aip) integrity checks on thinking blocks. Creates enforcement nudges when violations are detected.
+2. **Observer** — A scheduled Cloudflare Worker that processes AI Gateway logs. It extracts thinking blocks (Anthropic/Gemini) or reasoning summaries (OpenAI) from responses, analyzes decisions with Claude Haiku, builds [AP-Traces](https://github.com/mnemom/aap), verifies them against your agent's alignment card using the AAP SDK, and runs [AIP](https://github.com/mnemom/aip) integrity checks. Creates enforcement nudges when violations are detected.
 
 3. **API** — Serves agent data, traces, integrity scores, drift alerts, enforcement status, and a unified conscience timeline. Powers both the CLI and the web dashboard.
 
@@ -87,6 +97,16 @@ Smoltbot builds [AP-Traces](https://github.com/mnemom/aap) that record:
 
 What is **not** stored: your prompts, responses, or API key.
 
+### AIP Compatibility Matrix
+
+| Provider/Model | AIP Support | Method |
+|----------------|-------------|--------|
+| Anthropic reasoning models (Opus, Sonnet) | Full | Thinking blocks analyzed directly |
+| OpenAI GPT-5 Thinking series | Partial | Reasoning summaries (reduced confidence) |
+| Gemini 2.5/3 with thinking | Full | Thought parts analyzed directly |
+| Non-reasoning models | Tracing only | Synthetic clear verdict |
+| Legacy OpenAI (o3/o4-mini) | Unsupported | Reasoning encrypted |
+
 ## Enforcement Modes
 
 Smoltbot supports three enforcement modes for integrity violations:
@@ -97,14 +117,14 @@ Smoltbot supports three enforcement modes for integrity violations:
 | `nudge` | Detect violations, inject feedback into the agent's next request via system prompt — the agent sees it and can self-correct |
 | `enforce` | Hard block with 403 for non-streaming; falls back to nudge for streaming |
 
-When a violation is detected in `nudge` or `enforce` mode, a pending nudge record is created. On the agent's next request, the gateway injects an integrity notice into the system prompt. The agent sees the notice, can review its approach, and self-correct. The nudge delivery is tracked in the conscience timeline.
+When a violation is detected in `nudge` or `enforce` mode, a pending nudge record is created. On the agent's next request, the gateway injects an integrity notice into the system prompt. The agent sees the notice, can review its approach, and self-correct. The nudge delivery is tracked in the conscience timeline. Enforcement works across all providers where AIP is supported.
 
 Set enforcement mode via the API: `PUT /v1/agents/:id/enforcement` with `{"mode": "nudge"}`.
 
 ## Current Limitations
 
-- **Anthropic only** — Smoltbot currently supports the Anthropic API (Claude) only. Other providers are not yet supported.
-- **API key auth only** — Agent identification uses Anthropic API key hashing. OAuth and other auth methods are not supported.
+- **API key auth only** — Agent identification uses API key hashing (SHA-256, works identically across all providers). OAuth and other auth methods are not supported.
+- **AIP requires reasoning models** — AIP integrity checking requires models with exposed thinking (Anthropic, Gemini, GPT-5 Thinking). Models without thinking get synthetic clear verdicts.
 - **Hosted gateway** — The default gateway runs on Mnemom infrastructure. Self-hosting is possible but requires manual setup.
 
 ## Dependencies
@@ -114,6 +134,7 @@ Set enforcement mode via the API: `PUT /v1/agents/:id/enforcement` with `{"mode"
 - [Cloudflare Workers](https://workers.cloudflare.com/) — Gateway, observer, and API hosting
 - [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) — Request logging and analytics
 - [Supabase](https://supabase.com/) — Postgres database with row-level security
+- API keys: Anthropic (required for AIP analysis), OpenAI and Gemini (optional, for multi-provider tracing)
 
 ## Self-Hosting
 

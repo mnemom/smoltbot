@@ -5,6 +5,7 @@
 [![npm](https://img.shields.io/npm/v/smoltbot.svg)](https://www.npmjs.com/package/smoltbot)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![AAP](https://img.shields.io/badge/AAP-compliant-green.svg)](https://github.com/mnemom/aap)
+[![AIP](https://img.shields.io/badge/AIP-compliant-green.svg)](https://github.com/mnemom/aip)
 
 Transparent AI agent tracing. [AAP](https://github.com/mnemom/aap)-compliant.
 
@@ -17,21 +18,31 @@ npm install -g smoltbot
 smoltbot init
 ```
 
-That's it. `smoltbot init` configures your local environment to route API calls through the Mnemom gateway, where they're traced and verified. Your API key never leaves your machine — only a SHA-256 hash is used for agent identification.
+That's it. `smoltbot init` detects your configured AI provider API keys (Anthropic, OpenAI, Gemini) and configures your local environment to route API calls through the Mnemom gateway, where they're traced and verified. Your API keys never leave your machine — only SHA-256 hashes are used for agent identification.
+
+## Supported Providers
+
+| Provider | Models | Thinking/AIP | Auth |
+|----------|--------|-------------|------|
+| Anthropic | Claude Opus 4.6, Opus 4.5, Sonnet 4.5 | Full (thinking blocks) | `x-api-key` |
+| OpenAI | GPT-5.2, GPT-5.2 Pro, GPT-5 | Via reasoning summaries | `Authorization: Bearer` |
+| Gemini | Gemini 2.5 Pro, Gemini 3 Pro | Full (thought parts) | `x-goog-api-key` |
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `smoltbot init` | Configure tracing for your AI agent |
-| `smoltbot status` | Show agent status and connection info |
+| `smoltbot init` | Configure tracing for your AI agent (multi-provider) |
+| `smoltbot status` | Show agent status, providers, and connection info |
 | `smoltbot integrity` | Display integrity score and verification stats |
 | `smoltbot logs [-l N]` | Show recent traces and actions |
 
 ## How It Works
 
 ```
-Your App → smoltbot gateway → AI Provider (Anthropic, etc.)
+                    ┌─── /anthropic/* ──→ Anthropic (Claude)
+Your App → smoltbot ├─── /openai/*    ──→ OpenAI (GPT-5)
+           gateway  └─── /gemini/*    ──→ Google (Gemini)
                 ↓
            CF AI Gateway
                 ↓
@@ -42,37 +53,15 @@ Your App → smoltbot gateway → AI Provider (Anthropic, etc.)
          Dashboard (mnemom.ai)
 ```
 
-1. **Gateway** — A Cloudflare Worker that intercepts API requests. It identifies your agent via API key hash (zero-config), attaches tracing metadata, and forwards requests transparently. Your prompts and responses pass through unchanged.
+1. **Gateway** — A Cloudflare Worker that intercepts API requests to Anthropic, OpenAI, and Gemini. It identifies your agent via API key hash (zero-config), attaches tracing metadata, injects thinking/reasoning per provider, performs real-time integrity checking, injects conscience nudges, and delivers webhooks. Your prompts and responses pass through unchanged.
 
-2. **Observer** — A scheduled Cloudflare Worker that processes AI Gateway logs. It extracts thinking blocks and tool calls from responses, analyzes decisions with Claude Haiku, builds [AP-Traces](https://github.com/mnemom/aap), and verifies them against your agent's alignment card using the AAP SDK.
+2. **Observer** — A scheduled Cloudflare Worker that processes AI Gateway logs. It extracts thinking blocks (Anthropic/Gemini) or reasoning summaries (OpenAI) from responses, analyzes decisions with Claude Haiku, builds [AP-Traces](https://github.com/mnemom/aap), verifies them against your agent's alignment card using the AAP SDK, and runs [AIP](https://github.com/mnemom/aip) integrity checks. Creates enforcement nudges when violations are detected.
 
-3. **API** — Serves agent data, traces, integrity scores, drift alerts, and blog posts. Powers both the CLI and the web dashboard.
+3. **API** — Serves agent data, traces, integrity scores, drift alerts, enforcement status, and a unified conscience timeline. Powers both the CLI and the web dashboard.
 
 4. **CLI** — The `smoltbot` command. Configures your local environment and queries your agent's transparency data.
 
-5. **Dashboard** — Web UI at [mnemom.ai](https://mnemom.ai) where you can view traces, claim your agent, and monitor alignment.
-
-## Architecture
-
-```
-smoltbot/
-├── cli/          # CLI tool (npm package)
-├── gateway/      # Cloudflare Worker — API proxy + tracing
-├── observer/     # Cloudflare Worker — trace builder + AAP verification
-├── api/          # Cloudflare Worker — REST API
-├── dashboard/    # React frontend (legacy, see mnemom-website)
-└── database/     # Supabase schema (Postgres)
-```
-
-## Claiming Your Agent
-
-After `smoltbot init`, your agent is registered automatically. To link it to your Mnemom account:
-
-1. Run `smoltbot status` to get your agent ID
-2. Go to [mnemom.ai/claim](https://mnemom.ai/claim)
-3. Paste your agent ID and prove ownership with your API key hash
-
-Claiming gives you a private dashboard with full trace history, integrity scores, and drift detection.
+5. **Dashboard** — Web UI at [mnemom.ai](https://mnemom.ai) where you can view the conscience timeline, claim your agent, and monitor alignment.
 
 ## What Gets Traced
 
@@ -82,35 +71,43 @@ Smoltbot builds [AP-Traces](https://github.com/mnemom/aap) that record:
 - **Decision** — What alternatives were considered and why one was selected
 - **Escalation** — Whether the agent escalated to a human and why
 - **Verification** — Whether the trace is consistent with the agent's declared alignment card
+- **Integrity** — Real-time [AIP](https://github.com/mnemom/aip) analysis of thinking blocks, with verdict (clear/review_needed/boundary_violation)
 
 What is **not** stored: your prompts, responses, or API key.
 
+### AIP Compatibility Matrix
+
+| Provider/Model | AIP Support | Method |
+|----------------|-------------|--------|
+| Anthropic reasoning models (Opus, Sonnet) | Full | Thinking blocks analyzed directly |
+| OpenAI GPT-5 Thinking series | Partial | Reasoning summaries (reduced confidence) |
+| Gemini 2.5/3 with thinking | Full | Thought parts analyzed directly |
+| Non-reasoning models | Tracing only | Synthetic clear verdict |
+
+## Enforcement Modes
+
+| Mode | Behavior |
+|------|----------|
+| `observe` | Detect violations, record them, take no action (default) |
+| `nudge` | Detect violations, inject feedback into the agent's next request via system prompt — the agent sees it and can self-correct |
+| `enforce` | Hard block with 403 for non-streaming; falls back to nudge for streaming |
+
+Enforcement works across all providers where AIP is supported.
+
 ## Current Limitations
 
-- **Anthropic only** — Smoltbot currently supports the Anthropic API (Claude) only. Other providers are not yet supported.
-- **API key auth only** — Agent identification uses Anthropic API key hashing. OAuth and other auth methods are not supported.
+- **API key auth only** — Agent identification uses API key hashing (SHA-256, works identically across all providers). OAuth and other auth methods are not supported.
+- **AIP requires reasoning models** — AIP integrity checking requires models with exposed thinking. Models without thinking get synthetic clear verdicts.
 - **Hosted gateway** — The default gateway runs on Mnemom infrastructure. Self-hosting is possible but requires manual setup.
 
 ## Dependencies
 
-- [Agent Alignment Protocol (AAP)](https://github.com/mnemom/aap) — `@mnemom/agent-alignment-protocol` on npm
+- [Agent Alignment Protocol (AAP)](https://github.com/mnemom/aap) — `@mnemom/agent-alignment-protocol@0.1.8` on npm
+- [Agent Integrity Protocol (AIP)](https://github.com/mnemom/aip) — `@mnemom/agent-integrity-protocol@0.1.4` on npm
 - [Cloudflare Workers](https://workers.cloudflare.com/) — Gateway, observer, and API hosting
 - [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/) — Request logging and analytics
 - [Supabase](https://supabase.com/) — Postgres database with row-level security
-
-## Self-Hosting
-
-Smoltbot is designed to run on Cloudflare Workers + Supabase. To self-host:
-
-1. Create a Supabase project and run `database/schema.sql`
-2. Deploy workers: `cd gateway && wrangler deploy`, `cd api && wrangler deploy`, `cd observer && wrangler deploy`
-3. Set secrets on each worker via `wrangler secret put`
-4. Configure a Cloudflare AI Gateway and point the gateway worker to it
-5. Update the CLI's gateway URL: `smoltbot init --gateway=https://your-domain.com`
-
-## Contributing
-
-Contributions welcome. Please open an issue first to discuss what you'd like to change.
+- API keys: Anthropic (required for AIP analysis), OpenAI and Gemini (optional, for multi-provider tracing)
 
 ## License
 

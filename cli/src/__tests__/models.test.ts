@@ -2,12 +2,14 @@ import { describe, it, expect } from "vitest";
 
 import {
   ANTHROPIC_MODELS,
+  MODEL_REGISTRY,
   getModelDefinition,
   isKnownModel,
   isAnthropicModel,
   formatModelName,
   getAllKnownModelIds,
   getLatestModels,
+  detectProvider,
 } from "../lib/models.js";
 
 describe("models", () => {
@@ -129,7 +131,17 @@ describe("models", () => {
 
     it("should return model ID for unparseable names", () => {
       expect(formatModelName("some-random-model")).toBe("some-random-model");
-      expect(formatModelName("gpt-4")).toBe("gpt-4");
+    });
+
+    it("should format OpenAI model names", () => {
+      expect(formatModelName("gpt-5.2")).toBe("GPT-5.2 Thinking");
+      expect(formatModelName("gpt-5.2-pro")).toBe("GPT-5.2 Pro");
+      expect(formatModelName("gpt-5-mini")).toBe("GPT-5 Mini");
+    });
+
+    it("should format Gemini model names", () => {
+      expect(formatModelName("gemini-2.5-pro")).toBe("Gemini 2.5 Pro");
+      expect(formatModelName("gemini-3-pro-preview")).toBe("Gemini 3 Pro");
     });
   });
 
@@ -146,26 +158,73 @@ describe("models", () => {
   });
 
   describe("getLatestModels", () => {
-    it("should return latest model for each tier", () => {
+    it("should return latest models per provider", () => {
       const latest = getLatestModels();
 
-      expect(latest.length).toBe(3);
+      expect(latest.anthropic.length).toBeGreaterThanOrEqual(3);
+      expect(latest.openai.length).toBeGreaterThanOrEqual(3);
+      expect(latest.gemini.length).toBeGreaterThanOrEqual(2);
 
-      const ids = latest.map((m) => m.id);
-      expect(ids).toContain("claude-opus-4-5-20251101");
-      expect(ids).toContain("claude-sonnet-4-5-20250929");
-      expect(ids).toContain("claude-haiku-4-5-20251001");
+      const anthropicIds = latest.anthropic.map((m) => m.id);
+      expect(anthropicIds).toContain("claude-opus-4-5-20251101");
+      expect(anthropicIds).toContain("claude-sonnet-4-5-20250929");
     });
 
-    it("should return full model definitions", () => {
+    it("should return full model definitions for each provider", () => {
       const latest = getLatestModels();
 
-      for (const model of latest) {
-        expect(model.id).toBeDefined();
-        expect(model.name).toBeDefined();
-        expect(model.contextWindow).toBeDefined();
-        expect(model.maxTokens).toBeDefined();
+      for (const models of Object.values(latest)) {
+        for (const model of models) {
+          expect(model.id).toBeDefined();
+          expect(model.name).toBeDefined();
+          expect(model.contextWindow).toBeDefined();
+          expect(model.maxTokens).toBeDefined();
+        }
       }
+    });
+  });
+
+  describe("detectProvider", () => {
+    it("should detect Anthropic models", () => {
+      expect(detectProvider("claude-opus-4-5-20251101")).toBe("anthropic");
+      expect(detectProvider("claude-3-haiku-20240307")).toBe("anthropic");
+    });
+
+    it("should detect OpenAI models", () => {
+      expect(detectProvider("gpt-5.2")).toBe("openai");
+      expect(detectProvider("gpt-5-mini")).toBe("openai");
+      expect(detectProvider("o3")).toBe("openai");
+      expect(detectProvider("o4-mini")).toBe("openai");
+    });
+
+    it("should detect Gemini models", () => {
+      expect(detectProvider("gemini-2.5-pro")).toBe("gemini");
+      expect(detectProvider("gemini-3-pro-preview")).toBe("gemini");
+    });
+
+    it("should return null for unknown models", () => {
+      expect(detectProvider("unknown-model")).toBeNull();
+      expect(detectProvider("llama-3")).toBeNull();
+    });
+  });
+
+  describe("MODEL_REGISTRY", () => {
+    it("should have entries for all providers", () => {
+      expect(Object.keys(MODEL_REGISTRY.anthropic).length).toBeGreaterThan(0);
+      expect(Object.keys(MODEL_REGISTRY.openai).length).toBeGreaterThan(0);
+      expect(Object.keys(MODEL_REGISTRY.gemini).length).toBeGreaterThan(0);
+    });
+
+    it("should include OpenAI GPT-5 models", () => {
+      expect(MODEL_REGISTRY.openai["gpt-5.2"]).toBeDefined();
+      expect(MODEL_REGISTRY.openai["gpt-5"]).toBeDefined();
+      expect(MODEL_REGISTRY.openai["gpt-5.2"].reasoning).toBe(true);
+    });
+
+    it("should include Gemini models", () => {
+      expect(MODEL_REGISTRY.gemini["gemini-2.5-pro"]).toBeDefined();
+      expect(MODEL_REGISTRY.gemini["gemini-3-pro-preview"]).toBeDefined();
+      expect(MODEL_REGISTRY.gemini["gemini-2.5-pro"].reasoning).toBe(true);
     });
   });
 });

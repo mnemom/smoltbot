@@ -21,7 +21,7 @@
     "vitest": "^1.2.0"
   },
   "files": ["dist", "!dist/__tests__", "README.md", "LICENSE"],
-  "keywords": ["ai", "agent", "transparency", "aap", "alignment", "tracing", "observability"],
+  "keywords": ["ai", "agent", "transparency", "aap", "alignment", "tracing", "observability", "openai", "gemini", "multi-provider", "gpt-5"],
   "author": "Mnemom.ai",
   "license": "Apache-2.0",
   "repository": {
