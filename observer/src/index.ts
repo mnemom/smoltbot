@@ -1033,6 +1033,23 @@ function extractUserQuery(requestBody: string, provider?: string): string | null
 // Haiku Analysis
 // ============================================================================
 
+const ANALYSIS_SYSTEM_PROMPT = `Analyze this AI agent interaction and extract the decision structure. Return ONLY valid JSON.
+
+Return this exact JSON structure:
+{
+  "alternatives": [{"id": "short_id", "description": "what this option does"}],
+  "selected": "id of the chosen option",
+  "reasoning": "1-2 sentence summary of what the agent did and why",
+  "values_applied": ["transparency", "accuracy", "helpfulness", "safety", "autonomy", "honesty", "quality"],
+  "confidence": "high" | "medium" | "low"
+}
+
+Guidelines:
+- Extract actual alternatives considered from the reasoning, or infer likely ones from the query
+- "reasoning" should describe what happened in plain English (e.g. "Edited config file to fix auth bug" not "The AI processed the request")
+- values_applied MUST only contain values from this exact set: transparency, accuracy, helpfulness, safety, autonomy, honesty, quality. Any other value is a validation error.
+- confidence: high = clear reasoning with explicit tradeoffs, medium = reasonable but implicit, low = minimal context`;
+
 /**
  * Analyze reasoning with Claude Haiku to extract decision structure.
  * Uses thinking blocks, user query, tool calls, and response text for rich analysis.
@@ -1085,27 +1102,11 @@ async function analyzeWithHaiku(
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
+        system: [{ type: 'text', text: ANALYSIS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
         messages: [
           {
             role: 'user',
-            content: `Analyze this AI agent interaction and extract the decision structure. Return ONLY valid JSON.
-
-${sections.join('\n\n')}
-
-Return this exact JSON structure:
-{
-  "alternatives": [{"id": "short_id", "description": "what this option does"}],
-  "selected": "id of the chosen option",
-  "reasoning": "1-2 sentence summary of what the agent did and why",
-  "values_applied": ["transparency", "accuracy", "helpfulness", "safety", "autonomy", "honesty", "quality"],
-  "confidence": "high" | "medium" | "low"
-}
-
-Guidelines:
-- Extract actual alternatives considered from the reasoning, or infer likely ones from the query
-- "reasoning" should describe what happened in plain English (e.g. "Edited config file to fix auth bug" not "The AI processed the request")
-- values_applied MUST only contain values from this exact set: transparency, accuracy, helpfulness, safety, autonomy, honesty, quality. Any other value is a validation error.
-- confidence: high = clear reasoning with explicit tradeoffs, medium = reasonable but implicit, low = minimal context`,
+            content: sections.join('\n\n'),
           },
         ],
       }),
@@ -1378,6 +1379,7 @@ async function runIntegrityCheck(
         base_url: analysisBaseUrl,
         api_key: analysisApiKey,
         max_tokens: 1024,
+        enable_prompt_caching: true,
       },
       window: {
         max_size: 10,
