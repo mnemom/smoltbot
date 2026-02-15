@@ -173,7 +173,7 @@ export async function handleCheckout(
   const user = await getAuth(request, env);
   if (!user) return errorResponse('Authentication required', 401);
 
-  const body = await request.json() as { plan_id?: string; annual?: boolean };
+  const body = await request.json() as { plan_id?: string; annual?: boolean; promo_code?: string };
   const planId = body.plan_id;
   if (!planId) {
     return errorResponse('plan_id is required', 400);
@@ -242,6 +242,30 @@ export async function handleCheckout(
   const meteredPriceId = plan.stripe_metered_price_id as string | undefined;
   const meteredPriceIds = meteredPriceId ? [meteredPriceId] : undefined;
 
+  // Validate promo code if provided
+  let promotionCodeId: string | undefined;
+  if (body.promo_code) {
+    try {
+      const stripe = (await import('stripe')).default;
+      const stripeClient = new stripe(env.STRIPE_SECRET_KEY, {
+        apiVersion: '2026-01-28.clover' as any,
+        httpClient: stripe.createFetchHttpClient(),
+      });
+      const promoCodes = await stripeClient.promotionCodes.list({
+        code: body.promo_code,
+        active: true,
+        limit: 1,
+      });
+      if (promoCodes.data.length === 0) {
+        return errorResponse('Invalid promo code', 400);
+      }
+      promotionCodeId = promoCodes.data[0].id;
+    } catch (err) {
+      console.warn('[billing] Promo code validation failed:', err);
+      return errorResponse('Invalid promo code', 400);
+    }
+  }
+
   const session = await providerInstance.createCheckoutSession({
     customerId,
     priceId,
@@ -253,9 +277,9 @@ export async function handleCheckout(
       mnemom_plan_id: planId,
       mnemom_account_id: accountId,
     },
-    // Developer: card required immediately. Team: trial first.
     trialPeriodDays: isDeveloper ? undefined : 14,
     paymentMethodCollection: isDeveloper ? 'always' : 'if_required',
+    promotionCodeId,
   });
 
   return jsonResponse({ url: session.url, session_id: session.id });
@@ -505,6 +529,231 @@ export async function handleListInvoices(
 }
 
 // ============================================
+// GET /v1/billing/usage
+// ============================================
+
+export async function handleGetMyUsage(
+  env: BillingEnv,
+  request: Request,
+  getAuth: AuthGetter
+): Promise<Response> {
+  const user = await getAuth(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  const url = new URL(request.url);
+  const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '30', 10), 1), 90);
+
+  const accounts = await supabaseQuery(env, 'billing_accounts', { user_id: user.sub });
+  if (accounts.length === 0) {
+    return errorResponse('No billing account found', 404);
+  }
+
+  const account = accounts[0] as Record<string, unknown>;
+  const accountId = account.account_id as string;
+
+  // Query usage_daily_rollup for the period
+  const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+  const rollupUrl = new URL(`${env.SUPABASE_URL}/rest/v1/usage_daily_rollup`);
+  rollupUrl.searchParams.set('account_id', `eq.${accountId}`);
+  rollupUrl.searchParams.set('rollup_date', `gte.${startDate}`);
+  rollupUrl.searchParams.set('order', 'rollup_date.asc');
+
+  const rollupResponse = await fetch(rollupUrl.toString(), {
+    headers: {
+      apikey: env.SUPABASE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_KEY}`,
+    },
+  });
+
+  const daily = rollupResponse.ok
+    ? (await rollupResponse.json()) as Array<Record<string, unknown>>
+    : [];
+
+  // Compute summary
+  const checksUsed = account.check_count_this_period as number || 0;
+  const plan = await supabaseQuery(env, 'plans', { plan_id: account.plan_id as string });
+  const planData = plan.length > 0 ? plan[0] as Record<string, unknown> : null;
+  const checksIncluded = (planData?.included_checks as number) || 0;
+  const perCheckPrice = (planData?.per_check_price as number) || 0;
+  const overage = Math.max(0, checksUsed - checksIncluded);
+  const estimatedCost = overage * perCheckPrice;
+
+  return jsonResponse({
+    daily,
+    summary: {
+      checks_used: checksUsed,
+      checks_included: checksIncluded,
+      overage,
+      estimated_overage_cost: estimatedCost,
+      period_start: account.current_period_start,
+      period_end: account.current_period_end,
+    },
+  });
+}
+
+// ============================================
+// GET /v1/billing/usage/agents
+// ============================================
+
+export async function handleGetMyAgentUsage(
+  env: BillingEnv,
+  request: Request,
+  getAuth: AuthGetter
+): Promise<Response> {
+  const user = await getAuth(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  const url = new URL(request.url);
+  const days = Math.min(Math.max(parseInt(url.searchParams.get('days') || '30', 10), 1), 90);
+
+  const { data, error } = await supabaseRpc(env, 'get_user_agent_usage', {
+    p_user_id: user.sub,
+    p_days: days,
+  });
+
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+
+  return jsonResponse(data);
+}
+
+// ============================================
+// GET /v1/billing/export/usage
+// ============================================
+
+export async function handleExportUsage(
+  env: BillingEnv,
+  request: Request,
+  getAuth: AuthGetter
+): Promise<Response> {
+  const user = await getAuth(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  const url = new URL(request.url);
+  const from = url.searchParams.get('from');
+  const to = url.searchParams.get('to');
+
+  if (!from || !to) {
+    return errorResponse('from and to date parameters are required (YYYY-MM-DD)', 400);
+  }
+
+  // Validate date format
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    return errorResponse('Invalid date format. Use YYYY-MM-DD.', 400);
+  }
+
+  const accounts = await supabaseQuery(env, 'billing_accounts', { user_id: user.sub });
+  if (accounts.length === 0) {
+    return errorResponse('No billing account found', 404);
+  }
+
+  const account = accounts[0] as Record<string, unknown>;
+  const accountId = account.account_id as string;
+
+  // Query usage_daily_rollup
+  const rollupUrl = new URL(`${env.SUPABASE_URL}/rest/v1/usage_daily_rollup`);
+  rollupUrl.searchParams.set('account_id', `eq.${accountId}`);
+  rollupUrl.searchParams.set('rollup_date', `gte.${from}`);
+  rollupUrl.searchParams.set('rollup_date', `lte.${to}`);
+  rollupUrl.searchParams.set('order', 'rollup_date.asc');
+
+  const rollupResponse = await fetch(rollupUrl.toString(), {
+    headers: {
+      apikey: env.SUPABASE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_KEY}`,
+    },
+  });
+
+  const daily = rollupResponse.ok
+    ? (await rollupResponse.json()) as Array<Record<string, unknown>>
+    : [];
+
+  // Generate CSV
+  const csvLines = ['Date,Check Count,Tokens In,Tokens Out'];
+  for (const row of daily) {
+    csvLines.push(
+      `${row.rollup_date},${row.check_count ?? 0},${row.tokens_in ?? 0},${row.tokens_out ?? 0}`
+    );
+  }
+  const csv = csvLines.join('\n');
+
+  return new Response(csv, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename="mnemom-usage-${from}-to-${to}.csv"`,
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+}
+
+// ============================================
+// GET /v1/billing/budget-alert
+// ============================================
+
+export async function handleGetBudgetAlert(
+  env: BillingEnv,
+  request: Request,
+  getAuth: AuthGetter
+): Promise<Response> {
+  const user = await getAuth(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  const accounts = await supabaseQuery(env, 'billing_accounts', { user_id: user.sub });
+  if (accounts.length === 0) {
+    return errorResponse('No billing account found', 404);
+  }
+
+  const account = accounts[0] as Record<string, unknown>;
+
+  return jsonResponse({
+    threshold_cents: account.budget_alert_threshold_cents ?? null,
+    last_alert_sent_at: account.budget_alert_sent_at ?? null,
+  });
+}
+
+// ============================================
+// PUT /v1/billing/budget-alert
+// ============================================
+
+export async function handleSetBudgetAlert(
+  env: BillingEnv,
+  request: Request,
+  getAuth: AuthGetter
+): Promise<Response> {
+  const user = await getAuth(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  const body = await request.json() as { threshold_cents?: number | null };
+
+  // Allow null to clear the threshold
+  if (body.threshold_cents !== null && body.threshold_cents !== undefined) {
+    if (typeof body.threshold_cents !== 'number' || body.threshold_cents < 0) {
+      return errorResponse('threshold_cents must be a non-negative number or null', 400);
+    }
+  }
+
+  const accounts = await supabaseQuery(env, 'billing_accounts', { user_id: user.sub });
+  if (accounts.length === 0) {
+    return errorResponse('No billing account found', 404);
+  }
+
+  const account = accounts[0] as Record<string, unknown>;
+  const accountId = account.account_id as string;
+
+  await supabaseUpdate(env, 'billing_accounts', { account_id: accountId }, {
+    budget_alert_threshold_cents: body.threshold_cents ?? null,
+    budget_alert_sent_at: null, // Reset when threshold changes
+    updated_at: new Date().toISOString(),
+  });
+
+  return jsonResponse({
+    threshold_cents: body.threshold_cents ?? null,
+    updated: true,
+  });
+}
+
+// ============================================
 // Cancel Stripe subscription (for delete-account flow)
 // ============================================
 
@@ -524,5 +773,52 @@ export async function cancelStripeSubscriptionForAccount(
     console.log(`[billing] Canceled subscription ${subscriptionId} for deleted account`);
   } catch (err) {
     console.warn(`[billing] Failed to cancel subscription on account deletion: ${err}`);
+  }
+}
+
+// ============================================
+// POST /v1/billing/validate-promo
+// ============================================
+
+export async function handleValidatePromo(
+  env: BillingEnv,
+  request: Request
+): Promise<Response> {
+  const body = await request.json() as { code?: string };
+  if (!body.code) {
+    return errorResponse('code is required', 400);
+  }
+
+  try {
+    const stripe = (await import('stripe')).default;
+    const stripeClient = new stripe(env.STRIPE_SECRET_KEY, {
+      apiVersion: '2026-01-28.clover' as any,
+      httpClient: stripe.createFetchHttpClient(),
+    });
+
+    const promoCodes = await stripeClient.promotionCodes.list({
+      code: body.code,
+      active: true,
+      limit: 1,
+      expand: ['data.coupon'],
+    });
+
+    if (promoCodes.data.length === 0) {
+      return jsonResponse({ valid: false });
+    }
+
+    const promo = promoCodes.data[0];
+    // Stripe SDK v20+ removed coupon from PromotionCode types but it's still present at runtime
+    const coupon = (promo as any).coupon as { percent_off?: number | null; amount_off?: number | null; name?: string | null };
+
+    return jsonResponse({
+      valid: true,
+      discount_percent: coupon.percent_off ?? null,
+      discount_amount_cents: coupon.amount_off ?? null,
+      name: coupon.name ?? promo.code,
+    });
+  } catch (err) {
+    console.error('[billing] Promo code validation error:', err);
+    return errorResponse('Failed to validate promo code', 500);
   }
 }

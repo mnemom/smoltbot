@@ -14,3 +14,6 @@ workers_dev = true
 # STRIPE_SECRET_KEY      (Stripe API secret key)
 # STRIPE_WEBHOOK_SECRET  (Stripe webhook signing secret)
 # RESEND_API_KEY         (Resend email API key)
+
+[triggers]
+crons = ["0 */6 * * *"]

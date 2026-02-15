@@ -52,6 +52,12 @@ import {
   handleChangePlan,
   handleListInvoices,
   cancelStripeSubscriptionForAccount,
+  handleGetMyUsage,
+  handleGetMyAgentUsage,
+  handleGetBudgetAlert,
+  handleSetBudgetAlert,
+  handleExportUsage,
+  handleValidatePromo,
 } from './billing/handlers';
 import { handleGetFeatures, requireFeature } from './billing/feature-gate';
 import { handleCreateApiKey, handleListApiKeys, handleRevokeApiKey } from './billing/api-keys';
@@ -3312,7 +3318,7 @@ async function handleGetMyBilling(env: Env, request: Request): Promise<Response>
 async function handleListPublicPlans(env: Env): Promise<Response> {
   const { data, error } = await supabaseQuery(env, 'plans', {
     filters: { is_public: true, is_archived: false },
-    select: 'plan_id,display_name,description,billing_model,base_price_cents,annual_price_cents,per_check_price,included_checks,trace_retention_days,feature_flags,limits,sort_order',
+    select: 'plan_id,display_name,description,billing_model,base_price_cents,annual_price_cents,per_check_price,included_checks,trace_retention_days,feature_flags,limits,sort_order,stripe_price_id,stripe_annual_price_id,stripe_metered_price_id',
     order: { column: 'sort_order', ascending: true },
   });
 
@@ -3431,6 +3437,21 @@ export default {
         return handleGetFeatures(env as unknown as BillingEnv, request, getAuthUser as any);
       }
 
+      // GET /v1/plans/public (alias)
+      if (path === '/v1/plans/public' && method === 'GET') {
+        return handleListPublicPlans(env);
+      }
+
+      // GET /v1/billing/usage
+      if (path === '/v1/billing/usage' && method === 'GET') {
+        return handleGetMyUsage(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // GET /v1/billing/usage/agents
+      if (path === '/v1/billing/usage/agents' && method === 'GET') {
+        return handleGetMyAgentUsage(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
       // ============================================
       // API KEY ROUTES
       // ============================================
@@ -3449,6 +3470,26 @@ export default {
       const apiKeyDeleteMatch = path.match(/^\/v1\/api-keys\/([^/]+)$/);
       if (apiKeyDeleteMatch && method === 'DELETE') {
         return handleRevokeApiKey(env as unknown as BillingEnv, request, getAuthUser as any, apiKeyDeleteMatch[1]);
+      }
+
+      // GET /v1/billing/budget-alert
+      if (path === '/v1/billing/budget-alert' && method === 'GET') {
+        return handleGetBudgetAlert(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // PUT /v1/billing/budget-alert
+      if (path === '/v1/billing/budget-alert' && method === 'PUT') {
+        return handleSetBudgetAlert(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // GET /v1/billing/export/usage
+      if (path === '/v1/billing/export/usage' && method === 'GET') {
+        return handleExportUsage(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // POST /v1/billing/validate-promo
+      if (path === '/v1/billing/validate-promo' && method === 'POST') {
+        return handleValidatePromo(env as unknown as BillingEnv, request);
       }
 
       // GET /v1/auth/me
@@ -3714,5 +3755,10 @@ export default {
         500
       );
     }
+  },
+
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    const { checkUsageAlerts } = await import('./billing/usage-alerts');
+    await checkUsageAlerts(env as unknown as BillingEnv);
   },
 };

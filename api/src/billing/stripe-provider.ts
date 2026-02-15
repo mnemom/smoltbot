@@ -64,6 +64,10 @@ export function createStripeProvider(secretKey: string): BillingProvider {
         },
       };
 
+      if (params.promotionCodeId) {
+        sessionParams.discounts = [{ promotion_code: params.promotionCodeId }];
+      }
+
       if (params.trialPeriodDays) {
         sessionParams.subscription_data!.trial_period_days = params.trialPeriodDays;
       }

@@ -66,6 +66,7 @@ export interface CheckoutSessionParams {
   metadata?: Record<string, string>;
   trialPeriodDays?: number;
   paymentMethodCollection?: 'always' | 'if_required';
+  promotionCodeId?: string;
 }
 
 // ============================================
@@ -138,4 +139,5 @@ export interface BillingEnv {
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   RESEND_API_KEY: string;
+  BILLING_CACHE?: KVNamespace;
 }

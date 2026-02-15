@@ -13,6 +13,8 @@ import {
   trialEndingEmail,
   trialExpiredEmail,
   subscriptionCanceledEmail,
+  planUpgradeEmail,
+  planDowngradeScheduledEmail,
 } from './email';
 
 // ============================================
@@ -346,11 +348,51 @@ async function handleSubscriptionUpdated(
 
   await supabaseUpdate(env, 'billing_accounts', { account_id: accountId }, updateData);
 
+  // Purge quota cache so gateway picks up new plan/status immediately
+  await purgeQuotaCache(env, accountId);
+
   await logBillingEvent(env, accountId, 'subscription_updated', {
     stripe_subscription_id: subscriptionId,
     status,
     cancel_at_period_end: cancelAtPeriodEnd,
   });
+
+  // Detect plan change and send appropriate email
+  const previousPlanId = (account as Record<string, unknown>).plan_id as string;
+  const newPlanId = updateData.plan_id as string | undefined;
+  if (newPlanId && newPlanId !== previousPlanId) {
+    const email = (account as Record<string, unknown>).billing_email as string;
+    if (email) {
+      // Determine if this is an upgrade or downgrade based on plan sort order
+      const planOrder: Record<string, number> = { 'plan-free': 0, 'plan-developer': 1, 'plan-team': 2, 'plan-enterprise': 3 };
+      const isUpgrade = (planOrder[newPlanId] ?? 0) > (planOrder[previousPlanId] ?? 0);
+
+      if (isUpgrade) {
+        const planNames: Record<string, string> = { 'plan-developer': 'Developer', 'plan-team': 'Team', 'plan-enterprise': 'Enterprise' };
+        await sendEmail(email, planUpgradeEmail({
+          email,
+          newPlan: planNames[newPlanId] || newPlanId,
+          features: newPlanId === 'plan-team'
+            ? ['15,000 included checks/month', '90-day trace retention', 'EU compliance exports', 'Pairwise coherence analysis']
+            : ['Managed integrity gateway', 'Private trace storage', 'Dashboard access'],
+        }), env);
+        await logBillingEvent(env, accountId, 'plan_upgraded', { from: previousPlanId, to: newPlanId });
+      } else {
+        const planNames: Record<string, string> = { 'plan-free': 'Free', 'plan-developer': 'Developer', 'plan-team': 'Team' };
+        const periodEnd = new Date(currentPeriodEnd * 1000).toISOString();
+        await sendEmail(email, planDowngradeScheduledEmail({
+          email,
+          currentPlan: planNames[previousPlanId] || previousPlanId,
+          newPlan: planNames[newPlanId] || newPlanId,
+          effectiveDate: periodEnd,
+          losingFeatures: previousPlanId === 'plan-team'
+            ? ['15,000 included checks', '90-day trace retention', 'EU compliance exports']
+            : ['Managed integrity gateway', 'Dashboard access'],
+        }), env);
+        await logBillingEvent(env, accountId, 'plan_downgraded', { from: previousPlanId, to: newPlanId });
+      }
+    }
+  }
 }
 
 async function handleSubscriptionDeleted(
@@ -376,6 +418,9 @@ async function handleSubscriptionDeleted(
     stripe_subscription_item_id: null,
     updated_at: new Date().toISOString(),
   });
+
+  // Purge quota cache on subscription deletion
+  await purgeQuotaCache(env, accountId);
 
   await logBillingEvent(env, accountId, 'subscription_canceled', {
     stripe_customer_id: customerId,
@@ -442,6 +487,9 @@ async function handleInvoicePaid(
     updated_at: new Date().toISOString(),
   });
 
+  // Purge quota cache on payment (period reset)
+  await purgeQuotaCache(env, accountId);
+
   await logBillingEvent(env, accountId, 'payment_succeeded', {
     amount_paid: amountPaid,
     hosted_invoice_url: hostedInvoiceUrl,
@@ -477,6 +525,9 @@ async function handleInvoicePaymentFailed(
     past_due_since: new Date().toISOString(),  // Phase 3: track grace period start
     updated_at: new Date().toISOString(),
   });
+
+  // Purge quota cache on past_due transition
+  await purgeQuotaCache(env, accountId);
 
   await logBillingEvent(env, accountId, attemptCount > 1 ? 'dunning_escalated' : 'payment_failed', {
     attempt_count: attemptCount,
@@ -531,6 +582,54 @@ async function handleCustomerUpdated(
 // ============================================
 // Helpers
 // ============================================
+
+/**
+ * Purge KV cache entries for a billing account.
+ * Deletes quota cache for all agents and API keys associated with the account.
+ */
+async function purgeQuotaCache(env: BillingEnv, accountId: string): Promise<void> {
+  if (!env.BILLING_CACHE) return;
+
+  try {
+    // Fetch agents linked to this account
+    const agentsResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/agents?billing_account_id=eq.${accountId}&select=id`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      },
+    );
+
+    if (agentsResponse.ok) {
+      const agents = (await agentsResponse.json()) as Array<{ id: string }>;
+      for (const agent of agents) {
+        await env.BILLING_CACHE.delete(`quota:agent:${agent.id}`).catch(() => {});
+      }
+    }
+
+    // Fetch active API keys for this account
+    const keysResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/mnemom_api_keys?account_id=eq.${accountId}&is_active=eq.true&select=key_hash`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      },
+    );
+
+    if (keysResponse.ok) {
+      const keys = (await keysResponse.json()) as Array<{ key_hash: string }>;
+      for (const key of keys) {
+        await env.BILLING_CACHE.delete(`quota:mk:${key.key_hash}`).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.warn(`[webhook] Cache purge failed for account ${accountId}:`, err);
+  }
+}
 
 function rpcHeaders(env: BillingEnv): Record<string, string> {
   return {

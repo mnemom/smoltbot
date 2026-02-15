@@ -12,12 +12,13 @@ workers_dev = true
 
 [vars]
 GATEWAY_VERSION = "2.0.0"
-BILLING_ENFORCEMENT_ENABLED = "false"
+BILLING_ENFORCEMENT_ENABLED = "true"
 
 # Billing quota cache — create with: wrangler kv:namespace create BILLING_CACHE
-# [[kv_namespaces]]
-# binding = "BILLING_CACHE"
-# id = "<your-namespace-id>"
+# Then fill in the id below. Preview namespace: wrangler kv:namespace create BILLING_CACHE --preview
+[[kv_namespaces]]
+binding = "BILLING_CACHE"
+id = "REPLACE_WITH_NAMESPACE_ID"
 
 # Secrets (set via wrangler secret put):
 # SUPABASE_URL
