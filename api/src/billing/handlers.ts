@@ -180,7 +180,7 @@ export async function handleCheckout(
   }
 
   if (planId === 'plan-enterprise') {
-    return jsonResponse({ action: 'contact_sales', url: 'https://mnemom.ai/contact' });
+    return jsonResponse({ action: 'contact_sales', url: 'mailto:support@mnemom.ai?subject=Enterprise%20Inquiry' });
   }
 
   if (planId === 'plan-free') {
@@ -451,7 +451,7 @@ export async function handleChangePlan(
   }
 
   if (newPlanId === 'plan-enterprise') {
-    return jsonResponse({ action: 'contact_sales', url: 'https://mnemom.ai/contact' });
+    return jsonResponse({ action: 'contact_sales', url: 'mailto:support@mnemom.ai?subject=Enterprise%20Inquiry' });
   }
 
   const accounts = await supabaseQuery(env, 'billing_accounts', { user_id: user.sub });
