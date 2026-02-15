@@ -1439,7 +1439,7 @@ export async function handleProviderProxy(
     );
 
     // ====================================================================
-    // Quota Enforcement (pre-forward)
+    // Mnemom API Key Validation + Quota Enforcement (pre-forward)
     // ====================================================================
     const billingEnabled = (env.BILLING_ENFORCEMENT_ENABLED ?? 'false') === 'true';
     let quotaDecision: QuotaDecision | null = null;
@@ -1447,7 +1447,45 @@ export async function handleProviderProxy(
     if (billingEnabled) {
       // Check for Mnemom API key (billing identity, separate from LLM key)
       const mnemomKey = request.headers.get('x-mnemom-api-key');
-      const mnemomKeyHash = mnemomKey ? await hashMnemomApiKey(mnemomKey) : undefined;
+      let mnemomKeyHash: string | undefined;
+      let resolvedAccountId: string | undefined;
+
+      if (mnemomKey) {
+        mnemomKeyHash = await hashMnemomApiKey(mnemomKey);
+
+        // Validate the Mnemom API key via RPC
+        try {
+          const keyResponse = await fetch(
+            `${env.SUPABASE_URL}/rest/v1/rpc/resolve_mnemom_api_key`,
+            {
+              method: 'POST',
+              headers: {
+                apikey: env.SUPABASE_KEY,
+                Authorization: `Bearer ${env.SUPABASE_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ p_key_hash: mnemomKeyHash }),
+            },
+          );
+
+          if (keyResponse.ok) {
+            const keyResult = (await keyResponse.json()) as { valid: boolean; account_id?: string };
+            if (!keyResult.valid) {
+              return new Response(JSON.stringify({
+                error: 'Invalid Mnemom API key',
+                type: 'authentication_error',
+              }), {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' },
+              });
+            }
+            resolvedAccountId = keyResult.account_id;
+          }
+        } catch (err) {
+          // Fail-open: log and continue without key validation
+          console.warn('[gateway] Mnemom API key validation failed (fail-open):', err);
+        }
+      }
 
       const quotaContext = await resolveQuotaContext(agent.id, env, mnemomKeyHash);
       quotaDecision = evaluateQuota(quotaContext);
