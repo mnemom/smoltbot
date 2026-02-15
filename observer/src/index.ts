@@ -56,6 +56,7 @@ interface Env {
   ANALYSIS_API_KEY?: string;
   OTLP_ENDPOINT?: string;
   OTLP_AUTH?: string;
+  STRIPE_SECRET_KEY?: string;
 }
 
 interface GatewayLog {
@@ -127,6 +128,12 @@ export default {
 
       // Roll up metering events for billing (idempotent, safe every tick)
       ctx.waitUntil(triggerMeteringRollup(env));
+
+      // Report daily usage to Stripe (midnight UTC only)
+      const now = new Date();
+      if (now.getUTCHours() === 0 && now.getUTCMinutes() === 0) {
+        ctx.waitUntil(reportDailyUsageToStripe(env));
+      }
 
       // Flush OTel spans for all processed logs in one batch
       if (otelExporter) {
@@ -1579,6 +1586,119 @@ async function triggerMeteringRollup(env: Env): Promise<void> {
     }
   } catch (error) {
     console.warn('[observer/metering] Error in metering rollup:', error);
+  }
+}
+
+/**
+ * Report daily usage to Stripe for metered billing.
+ * Runs once per day at midnight UTC.
+ * Queries all billing accounts with active metered subscriptions,
+ * reports cumulative check_count_this_period via createUsageRecord(action:'set').
+ */
+async function reportDailyUsageToStripe(env: Env): Promise<void> {
+  if (!env.STRIPE_SECRET_KEY) {
+    console.log('[observer/stripe] No STRIPE_SECRET_KEY, skipping usage reporting');
+    return;
+  }
+
+  try {
+    // Import Stripe dynamically to avoid import errors when key is not set
+    const { default: Stripe } = await import('stripe');
+    const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
+      apiVersion: '2025-01-27.acacia',
+      httpClient: Stripe.createFetchHttpClient(),
+    });
+
+    // Fetch accounts with active metered subscriptions
+    const accountsResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/billing_accounts?subscription_status=in.(active,trialing)&stripe_subscription_item_id=not.is.null&select=account_id,stripe_subscription_item_id,check_count_this_period`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!accountsResponse.ok) {
+      console.warn(`[observer/stripe] Failed to fetch accounts: ${accountsResponse.status}`);
+      return;
+    }
+
+    const accounts = (await accountsResponse.json()) as Array<{
+      account_id: string;
+      stripe_subscription_item_id: string;
+      check_count_this_period: number;
+    }>;
+
+    const today = new Date().toISOString().split('T')[0];
+    let reported = 0;
+
+    for (const account of accounts) {
+      const quantity = account.check_count_this_period || 0;
+      const idempotencyKey = `${account.account_id}-${today}`;
+
+      try {
+        await stripe.subscriptionItems.createUsageRecord(
+          account.stripe_subscription_item_id,
+          {
+            quantity,
+            timestamp: Math.floor(Date.now() / 1000),
+            action: 'set',
+          },
+          { idempotencyKey }
+        );
+
+        // Record in stripe_usage_reports
+        const reportId = `sur-${crypto.randomUUID().slice(0, 8)}`;
+        await fetch(`${env.SUPABASE_URL}/rest/v1/stripe_usage_reports`, {
+          method: 'POST',
+          headers: {
+            apikey: env.SUPABASE_KEY,
+            Authorization: `Bearer ${env.SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          },
+          body: JSON.stringify({
+            id: reportId,
+            account_id: account.account_id,
+            stripe_subscription_item_id: account.stripe_subscription_item_id,
+            reported_quantity: quantity,
+            idempotency_key: idempotencyKey,
+          }),
+        });
+
+        // Log billing event
+        const eventId = `be-${crypto.randomUUID().slice(0, 8)}`;
+        await fetch(`${env.SUPABASE_URL}/rest/v1/billing_events`, {
+          method: 'POST',
+          headers: {
+            apikey: env.SUPABASE_KEY,
+            Authorization: `Bearer ${env.SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          },
+          body: JSON.stringify({
+            event_id: eventId,
+            account_id: account.account_id,
+            event_type: 'usage_reported',
+            details: { quantity, date: today, idempotency_key: idempotencyKey },
+            performed_by: 'observer_cron',
+            timestamp: new Date().toISOString(),
+          }),
+        });
+
+        reported++;
+      } catch (error) {
+        console.warn(`[observer/stripe] Failed to report usage for ${account.account_id}:`, error);
+      }
+    }
+
+    if (reported > 0) {
+      console.log(`[observer/stripe] Reported usage for ${reported}/${accounts.length} accounts`);
+    }
+  } catch (error) {
+    console.warn('[observer/stripe] Error in daily usage reporting:', error);
   }
 }
 
