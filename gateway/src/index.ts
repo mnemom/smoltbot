@@ -51,6 +51,8 @@ export interface Env {
   OTLP_AUTH?: string;
   OPENAI_API_KEY?: string;
   GEMINI_API_KEY?: string;
+  BILLING_CACHE?: KVNamespace;          // Optional — fail-open if not bound
+  BILLING_ENFORCEMENT_ENABLED?: string; // "true"/"false", default "false"
 }
 
 interface Agent {
@@ -71,6 +73,237 @@ interface AlignmentCard {
   version: number;
   created_at: string;
   updated_at: string;
+}
+
+// ============================================================================
+// Quota Enforcement Types
+// ============================================================================
+
+export interface QuotaContext {
+  plan_id: string;
+  billing_model: string;       // 'none' | 'metered' | 'subscription' | 'subscription_plus_metered'
+  subscription_status: string; // 'trialing' | 'active' | 'past_due' | 'canceled' | 'none'
+  included_checks: number;
+  check_count_this_period: number;
+  overage_threshold: number | null;
+  per_check_price: number;
+  feature_flags: Record<string, boolean>;
+  limits: Record<string, unknown>;
+  account_id: string | null;
+  current_period_end: string | null;
+  past_due_since: string | null;
+}
+
+export interface QuotaDecision {
+  action: 'allow' | 'warn' | 'reject';
+  reason?: string;
+  usage_percent?: number;
+  headers: Record<string, string>;
+}
+
+const FREE_TIER_CONTEXT: QuotaContext = {
+  plan_id: 'plan-free',
+  billing_model: 'none',
+  subscription_status: 'none',
+  included_checks: 0,
+  check_count_this_period: 0,
+  overage_threshold: null,
+  per_check_price: 0,
+  feature_flags: {},
+  limits: {},
+  account_id: null,
+  current_period_end: null,
+  past_due_since: null,
+};
+
+// ============================================================================
+// Quota Enforcement Functions
+// ============================================================================
+
+/**
+ * Resolve quota context for an agent. Checks KV cache first, falls back to
+ * Supabase RPC. Fail-open: any error returns free-tier context.
+ */
+async function resolveQuotaContext(
+  agentId: string,
+  env: Env,
+  mnemomKeyHash?: string,
+): Promise<QuotaContext> {
+  try {
+    const cacheKey = mnemomKeyHash
+      ? `quota:mk:${mnemomKeyHash}`
+      : `quota:agent:${agentId}`;
+
+    // Check KV cache (5-min TTL)
+    if (env.BILLING_CACHE) {
+      try {
+        const cached = await env.BILLING_CACHE.get(cacheKey, 'json');
+        if (cached) return cached as QuotaContext;
+      } catch {
+        // KV read error — continue to RPC
+      }
+    }
+
+    // Call Supabase RPC
+    const rpcResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/rpc/get_quota_context_for_agent`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ p_agent_id: agentId }),
+      },
+    );
+
+    if (!rpcResponse.ok) {
+      console.warn(`[quota] RPC failed (${rpcResponse.status}), fail-open`);
+      return { ...FREE_TIER_CONTEXT };
+    }
+
+    const context = (await rpcResponse.json()) as QuotaContext;
+
+    // Write to KV cache (fire-and-forget, 5-min TTL)
+    if (env.BILLING_CACHE) {
+      env.BILLING_CACHE
+        .put(cacheKey, JSON.stringify(context), { expirationTtl: 300 })
+        .catch(() => {});
+    }
+
+    return context;
+  } catch (err) {
+    console.warn('[quota] resolveQuotaContext error, fail-open:', err);
+    return { ...FREE_TIER_CONTEXT };
+  }
+}
+
+/**
+ * Evaluate quota context and return a decision. Pure function — zero I/O.
+ */
+export function evaluateQuota(context: QuotaContext): QuotaDecision {
+  const headers: Record<string, string> = {};
+
+  // Free tier / no billing model → always allow (pass-through)
+  if (context.plan_id === 'plan-free' || context.billing_model === 'none') {
+    return { action: 'allow', headers };
+  }
+
+  // Enterprise → always allow
+  if (context.plan_id === 'plan-enterprise') {
+    return { action: 'allow', headers };
+  }
+
+  // Canceled → reject
+  if (context.subscription_status === 'canceled') {
+    return {
+      action: 'reject',
+      reason: 'subscription_canceled',
+      headers,
+    };
+  }
+
+  // Past due handling
+  if (context.subscription_status === 'past_due') {
+    // Team plan: immediate reject
+    if (context.plan_id === 'plan-team') {
+      return {
+        action: 'reject',
+        reason: 'subscription_past_due',
+        headers,
+      };
+    }
+
+    // Developer plan: 7-day grace period
+    if (context.plan_id === 'plan-developer' && context.past_due_since) {
+      const pastDueMs = Date.now() - new Date(context.past_due_since).getTime();
+      const gracePeriodMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+      if (pastDueMs > gracePeriodMs) {
+        return {
+          action: 'reject',
+          reason: 'subscription_past_due_grace_expired',
+          headers,
+        };
+      }
+      // Within grace period — allow
+      return { action: 'allow', headers };
+    }
+
+    // Developer past_due but no past_due_since recorded — allow (grace)
+    if (context.plan_id === 'plan-developer') {
+      return { action: 'allow', headers };
+    }
+
+    // Other plans past_due — reject
+    return {
+      action: 'reject',
+      reason: 'subscription_past_due',
+      headers,
+    };
+  }
+
+  // Active/trialing — check usage
+  const usagePercent =
+    context.included_checks > 0
+      ? (context.check_count_this_period / context.included_checks) * 100
+      : 0;
+
+  headers['X-Mnemom-Usage-Percent'] = String(Math.round(usagePercent));
+
+  // Overage threshold exceeded → reject
+  if (
+    context.overage_threshold !== null &&
+    context.check_count_this_period >= context.overage_threshold
+  ) {
+    return {
+      action: 'reject',
+      reason: 'overage_threshold_exceeded',
+      usage_percent: usagePercent,
+      headers,
+    };
+  }
+
+  // Team at/over 100% included → warn (overage billing active)
+  if (context.included_checks > 0 && usagePercent >= 100) {
+    headers['X-Mnemom-Usage-Warning'] = 'quota_exceeded';
+    return {
+      action: 'warn',
+      reason: 'quota_exceeded',
+      usage_percent: usagePercent,
+      headers,
+    };
+  }
+
+  // Approaching quota (>=80%)
+  if (context.included_checks > 0 && usagePercent >= 80) {
+    headers['X-Mnemom-Usage-Warning'] = 'approaching_quota';
+    return {
+      action: 'warn',
+      reason: 'approaching_quota',
+      usage_percent: usagePercent,
+      headers,
+    };
+  }
+
+  // Under quota or metered-only (no included_checks) → allow
+  return {
+    action: 'allow',
+    usage_percent: usagePercent,
+    headers,
+  };
+}
+
+/**
+ * Hash a Mnemom API key using SHA-256 (full hex, not truncated like agent hash).
+ */
+async function hashMnemomApiKey(key: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(key);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ============================================================================
@@ -1206,6 +1439,33 @@ export async function handleProviderProxy(
     );
 
     // ====================================================================
+    // Quota Enforcement (pre-forward)
+    // ====================================================================
+    const billingEnabled = (env.BILLING_ENFORCEMENT_ENABLED ?? 'false') === 'true';
+    let quotaDecision: QuotaDecision | null = null;
+
+    if (billingEnabled) {
+      // Check for Mnemom API key (billing identity, separate from LLM key)
+      const mnemomKey = request.headers.get('x-mnemom-api-key');
+      const mnemomKeyHash = mnemomKey ? await hashMnemomApiKey(mnemomKey) : undefined;
+
+      const quotaContext = await resolveQuotaContext(agent.id, env, mnemomKeyHash);
+      quotaDecision = evaluateQuota(quotaContext);
+
+      if (quotaDecision.action === 'reject') {
+        return new Response(JSON.stringify({
+          error: 'Request blocked by billing policy',
+          type: 'billing_error',
+          reason: quotaDecision.reason,
+          usage_percent: quotaDecision.usage_percent,
+        }), {
+          status: 402,
+          headers: { 'Content-Type': 'application/json', ...quotaDecision.headers },
+        });
+      }
+    }
+
+    // ====================================================================
     // Wave 1: Thinking injection (provider-specific)
     // ====================================================================
 
@@ -1283,6 +1543,13 @@ export async function handleProviderProxy(
       responseHeaders.set('X-AIP-Enforcement', 'nudge');
       responseHeaders.set('X-AIP-Nudge-Count', String(injectedNudgeIds.length));
       ctx.waitUntil(markNudgesDelivered(injectedNudgeIds, sessionId, env));
+    }
+
+    // Merge quota enforcement headers into response
+    if (quotaDecision) {
+      for (const [k, v] of Object.entries(quotaDecision.headers)) {
+        responseHeaders.set(k, v);
+      }
     }
 
     // Update last_seen and ensure alignment card is current (background)
@@ -1591,8 +1858,8 @@ export default {
         headers: {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, x-api-key, anthropic-version, anthropic-beta, authorization, x-goog-api-key',
-          'Access-Control-Expose-Headers': 'x-smoltbot-agent, x-smoltbot-session, X-AIP-Verdict, X-AIP-Checkpoint-Id, X-AIP-Action, X-AIP-Proceed, X-AIP-Synthetic',
+          'Access-Control-Allow-Headers': 'Content-Type, x-api-key, anthropic-version, anthropic-beta, authorization, x-goog-api-key, x-mnemom-api-key',
+          'Access-Control-Expose-Headers': 'x-smoltbot-agent, x-smoltbot-session, X-AIP-Verdict, X-AIP-Checkpoint-Id, X-AIP-Action, X-AIP-Proceed, X-AIP-Synthetic, X-Mnemom-Usage-Warning, X-Mnemom-Usage-Percent',
           'Access-Control-Max-Age': '86400',
         },
       });

@@ -6,7 +6,9 @@ import {
   buildMetadataHeader,
   handleHealthCheck,
   handleAnthropicProxy,
+  evaluateQuota,
   type Env,
+  type QuotaContext,
 } from '../index';
 
 // Mock fetch globally
@@ -773,5 +775,155 @@ describe('Request handler integration', () => {
 
     // Should not be 404
     expect(response.status).not.toBe(404);
+  });
+});
+
+// ============================================================================
+// evaluateQuota — pure function tests
+// ============================================================================
+
+describe('evaluateQuota', () => {
+  function makeContext(overrides: Partial<QuotaContext> = {}): QuotaContext {
+    return {
+      plan_id: 'plan-developer',
+      billing_model: 'metered',
+      subscription_status: 'active',
+      included_checks: 0,
+      check_count_this_period: 100,
+      overage_threshold: null,
+      per_check_price: 1.0,
+      feature_flags: { managed_gateway: true },
+      limits: {},
+      account_id: 'ba-test',
+      current_period_end: '2026-03-15T00:00:00Z',
+      past_due_since: null,
+      ...overrides,
+    };
+  }
+
+  it('should allow free tier', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-free',
+      billing_model: 'none',
+    }));
+    expect(decision.action).toBe('allow');
+  });
+
+  it('should allow enterprise', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-enterprise',
+      billing_model: 'none',
+    }));
+    expect(decision.action).toBe('allow');
+  });
+
+  it('should allow developer under quota (metered)', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-developer',
+      billing_model: 'metered',
+      subscription_status: 'active',
+    }));
+    expect(decision.action).toBe('allow');
+  });
+
+  it('should allow developer past_due within 7-day grace', () => {
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-developer',
+      subscription_status: 'past_due',
+      past_due_since: threeDaysAgo,
+    }));
+    expect(decision.action).toBe('allow');
+  });
+
+  it('should reject developer past_due after 7-day grace', () => {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-developer',
+      subscription_status: 'past_due',
+      past_due_since: tenDaysAgo,
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('subscription_past_due_grace_expired');
+  });
+
+  it('should allow team at 79% quota', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-team',
+      billing_model: 'subscription_plus_metered',
+      subscription_status: 'active',
+      included_checks: 15000,
+      check_count_this_period: 11850,
+    }));
+    expect(decision.action).toBe('allow');
+  });
+
+  it('should warn team at 80% quota (approaching)', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-team',
+      billing_model: 'subscription_plus_metered',
+      subscription_status: 'active',
+      included_checks: 15000,
+      check_count_this_period: 12000,
+    }));
+    expect(decision.action).toBe('warn');
+    expect(decision.reason).toBe('approaching_quota');
+    expect(decision.headers['X-Mnemom-Usage-Warning']).toBe('approaching_quota');
+  });
+
+  it('should warn team at 100% quota (overage billing active)', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-team',
+      billing_model: 'subscription_plus_metered',
+      subscription_status: 'active',
+      included_checks: 15000,
+      check_count_this_period: 15000,
+    }));
+    expect(decision.action).toBe('warn');
+    expect(decision.reason).toBe('quota_exceeded');
+    expect(decision.headers['X-Mnemom-Usage-Warning']).toBe('quota_exceeded');
+  });
+
+  it('should reject team past_due immediately', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-team',
+      subscription_status: 'past_due',
+      past_due_since: new Date().toISOString(),
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('subscription_past_due');
+  });
+
+  it('should reject canceled subscription', () => {
+    const decision = evaluateQuota(makeContext({
+      subscription_status: 'canceled',
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('subscription_canceled');
+  });
+
+  it('should reject when overage threshold exceeded', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-team',
+      billing_model: 'subscription_plus_metered',
+      subscription_status: 'active',
+      included_checks: 15000,
+      check_count_this_period: 20000,
+      overage_threshold: 18000,
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('overage_threshold_exceeded');
+  });
+
+  it('should include usage percent header on allow', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-team',
+      billing_model: 'subscription_plus_metered',
+      subscription_status: 'active',
+      included_checks: 15000,
+      check_count_this_period: 7500,
+    }));
+    expect(decision.action).toBe('allow');
+    expect(decision.headers['X-Mnemom-Usage-Percent']).toBe('50');
   });
 });
