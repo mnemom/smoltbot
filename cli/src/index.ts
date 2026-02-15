@@ -14,12 +14,19 @@ program
 
 program
   .command("init")
-  .description("Initialize smoltbot and configure OpenClaw for traced mode")
+  .description("Initialize smoltbot for traced mode (interactive, --openclaw, or --standalone)")
   .option("-y, --yes", "Skip confirmation prompts (accept defaults)")
   .option("-f, --force", "Force reconfiguration even if already configured")
+  .option("--openclaw", "Configure using OpenClaw (requires OpenClaw installed)")
+  .option("--standalone", "Configure standalone (prompt for API keys directly)")
   .action(async (options) => {
     try {
-      await initCommand({ yes: options.yes, force: options.force });
+      await initCommand({
+        yes: options.yes,
+        force: options.force,
+        openclaw: options.openclaw,
+        standalone: options.standalone,
+      });
     } catch (error) {
       console.error("Error:", error instanceof Error ? error.message : error);
       process.exit(1);

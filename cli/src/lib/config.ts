@@ -11,6 +11,7 @@ export interface Config {
   email?: string;
   gateway?: string;
   openclawConfigured?: boolean;
+  providers?: string[];  // e.g. ['anthropic', 'openai'] — standalone mode
   configuredAt?: string;
 }
 

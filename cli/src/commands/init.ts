@@ -27,7 +27,7 @@ import {
   getLatestModels,
 } from "../lib/models.js";
 import { refreshModelCache } from "../lib/model-cache.js";
-import { askYesNo, isInteractive } from "../lib/prompt.js";
+import { askYesNo, askInput, askMultiSelect, askSelect, isInteractive } from "../lib/prompt.js";
 
 const GATEWAY_URL = "https://gateway.mnemom.ai";
 const DASHBOARD_URL = "https://mnemom.ai";
@@ -35,7 +35,13 @@ const DASHBOARD_URL = "https://mnemom.ai";
 export interface InitOptions {
   yes?: boolean; // Skip confirmation prompts
   force?: boolean; // Force reconfiguration even if already configured
+  openclaw?: boolean; // Force OpenClaw mode
+  standalone?: boolean; // Force standalone mode
 }
+
+// ============================================================================
+// Entry point — dispatches to OpenClaw or standalone flow
+// ============================================================================
 
 export async function initCommand(options: InitOptions = {}): Promise<void> {
   console.log("\n" + "=".repeat(60));
@@ -48,7 +54,262 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     return;
   }
 
-  // Step 2: Detect OpenClaw installation
+  // Step 2: Determine mode
+  if (options.openclaw) {
+    // Explicit --openclaw: run OpenClaw flow, fail if not installed
+    return openclawFlow(options, existingConfig);
+  }
+
+  if (options.standalone) {
+    // Explicit --standalone: skip OpenClaw entirely
+    return standaloneFlow(options, existingConfig);
+  }
+
+  // No flags: detect OpenClaw and prompt if found
+  const detection = detectProviders();
+
+  if (detection.installed && isInteractive()) {
+    const choice = await askSelect(
+      "OpenClaw detected. Configure for OpenClaw or standalone?",
+      ["OpenClaw (use existing API keys from OpenClaw)", "Standalone (enter API keys directly)"],
+    );
+
+    if (choice && choice.startsWith("Standalone")) {
+      return standaloneFlow(options, existingConfig);
+    }
+    // Default to OpenClaw if selected or null
+    return openclawFlowWithDetection(options, existingConfig, detection);
+  }
+
+  if (detection.installed) {
+    // Non-interactive with OpenClaw detected: use OpenClaw
+    return openclawFlowWithDetection(options, existingConfig, detection);
+  }
+
+  // No OpenClaw: go straight to standalone
+  return standaloneFlow(options, existingConfig);
+}
+
+// ============================================================================
+// Standalone flow — prompt for API keys directly
+// ============================================================================
+
+const PROVIDER_LABELS: Record<Provider, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  gemini: "Gemini",
+};
+
+const KEY_FORMAT_PREFIXES: Record<Provider, { prefix: string; description: string }> = {
+  anthropic: { prefix: "sk-ant-", description: "starts with sk-ant-" },
+  openai: { prefix: "sk-", description: "starts with sk-" },
+  gemini: { prefix: "AIza", description: "starts with AIza" },
+};
+
+// Gateway route patterns (from gateway/src/index.ts):
+//   /anthropic/* → handleProviderProxy(..., 'anthropic')
+//   /openai/*   → handleProviderProxy(..., 'openai')
+//   /gemini/*   → handleProviderProxy(..., 'gemini')
+const GATEWAY_BASE_URLS: Record<Provider, string> = {
+  anthropic: `${GATEWAY_URL}/anthropic`,
+  openai: `${GATEWAY_URL}/openai/v1`,
+  gemini: `${GATEWAY_URL}/gemini`,
+};
+
+async function standaloneFlow(
+  options: InitOptions,
+  existingConfig: Config | null,
+): Promise<void> {
+  console.log("Standalone setup (no OpenClaw required)\n");
+
+  // Step 1: Select providers
+  let selectedProviderNames: string[];
+
+  if (!isInteractive()) {
+    console.log("Non-interactive mode: configuring all providers.\n");
+    selectedProviderNames = ["Anthropic", "OpenAI", "Gemini"];
+  } else {
+    selectedProviderNames = await askMultiSelect(
+      "Which providers do you want to configure?",
+      ["Anthropic", "OpenAI", "Gemini"],
+    );
+  }
+
+  if (selectedProviderNames.length === 0) {
+    console.log("\nNo providers selected. At least one provider is required.\n");
+    process.exit(1);
+  }
+
+  // Map display names back to Provider type
+  const nameToProvider: Record<string, Provider> = {
+    Anthropic: "anthropic",
+    OpenAI: "openai",
+    Gemini: "gemini",
+  };
+  const selectedProviders = selectedProviderNames.map((n) => nameToProvider[n]).filter(Boolean);
+
+  console.log();
+
+  // Step 2: Prompt for API key for each selected provider
+  const verifiedProviders: { provider: Provider; apiKey: string }[] = [];
+
+  for (const provider of selectedProviders) {
+    const label = PROVIDER_LABELS[provider];
+    const format = KEY_FORMAT_PREFIXES[provider];
+
+    let apiKey = "";
+    let valid = false;
+
+    while (!valid) {
+      if (isInteractive()) {
+        apiKey = await askInput(`${label} API key (${format.description}):`, true);
+      } else {
+        // Non-interactive: read from env
+        const envVarMap: Record<Provider, string> = {
+          anthropic: "ANTHROPIC_API_KEY",
+          openai: "OPENAI_API_KEY",
+          gemini: "GEMINI_API_KEY",
+        };
+        apiKey = process.env[envVarMap[provider]] || "";
+        if (!apiKey) {
+          console.log(`  ${label}: No API key in ${envVarMap[provider]}, skipping`);
+          break;
+        }
+      }
+
+      if (!apiKey) {
+        console.log(`  Skipping ${label} (no key entered)\n`);
+        break;
+      }
+
+      // Validate format
+      if (!apiKey.startsWith(format.prefix)) {
+        console.log(`  ✗ Invalid format: expected key ${format.description}`);
+        if (!isInteractive()) break;
+        console.log("  Try again.\n");
+        continue;
+      }
+
+      // Verify with test API call
+      console.log(`  Verifying ${label} API key...`);
+      const verification = await verifyProviderApiKey(provider, apiKey);
+      if (!verification.valid) {
+        console.log(`  ✗ ${verification.error}`);
+        if (!isInteractive()) break;
+        console.log("  Try again.\n");
+        continue;
+      }
+
+      console.log(`  ✓ ${label} API key verified\n`);
+      verifiedProviders.push({ provider, apiKey });
+      valid = true;
+    }
+  }
+
+  if (verifiedProviders.length === 0) {
+    console.log("✗ No valid API keys configured\n");
+    console.log("At least one provider is required. Run smoltbot init again.\n");
+    process.exit(1);
+  }
+
+  // Step 3: Create config
+  const firstApiKey = verifiedProviders[0].apiKey;
+  const agentId = firstApiKey
+    ? deriveAgentId(firstApiKey)
+    : existingConfig?.agentId || generateAgentId();
+
+  const providerNames = verifiedProviders.map((p) => p.provider);
+
+  const config: Config = {
+    agentId,
+    gateway: GATEWAY_URL,
+    openclawConfigured: false,
+    providers: providerNames,
+    configuredAt: new Date().toISOString(),
+  };
+
+  saveConfig(config);
+  console.log("✓ Created ~/.smoltbot/config.json\n");
+
+  // Step 4: Show success + setup instructions
+  showStandaloneSuccess(agentId, verifiedProviders);
+}
+
+/**
+ * Show standalone success message with SDK snippets per verified provider.
+ */
+function showStandaloneSuccess(
+  agentId: string,
+  verifiedProviders: { provider: Provider; apiKey: string }[],
+): void {
+  console.log("=".repeat(60));
+  console.log("  smoltbot initialized successfully!");
+  console.log("=".repeat(60) + "\n");
+
+  console.log(`Agent ID: ${agentId}\n`);
+
+  console.log("Verified providers:");
+  for (const { provider } of verifiedProviders) {
+    console.log(`  ✓ ${PROVIDER_LABELS[provider]}`);
+  }
+  console.log();
+
+  console.log("─".repeat(50));
+  console.log("\nConfigure your agent to use the gateway:\n");
+
+  for (const { provider } of verifiedProviders) {
+    const label = PROVIDER_LABELS[provider];
+    const baseUrl = GATEWAY_BASE_URLS[provider];
+
+    console.log(`  ${label}:`);
+
+    if (provider === "anthropic") {
+      console.log(`    Python:     client = Anthropic(base_url="${baseUrl}")`);
+      console.log(`    TypeScript: new Anthropic({ baseURL: "${baseUrl}" })`);
+      console.log(`    Env var:    export ANTHROPIC_BASE_URL=${baseUrl}`);
+    } else if (provider === "openai") {
+      console.log(`    Python:     client = OpenAI(base_url="${baseUrl}")`);
+      console.log(`    TypeScript: new OpenAI({ baseURL: "${baseUrl}" })`);
+      console.log(`    Env var:    export OPENAI_BASE_URL=${baseUrl}`);
+    } else if (provider === "gemini") {
+      console.log(`    REST:       POST ${baseUrl}/v1beta/models/{model}:generateContent`);
+      console.log(`    Env var:    export GEMINI_BASE_URL=${baseUrl}`);
+    }
+    console.log();
+  }
+
+  console.log("Your API key is passed through to the provider via the gateway.");
+  console.log("The gateway traces requests for transparency — no keys are stored.\n");
+
+  console.log(`Your traces will appear at:\n`);
+  console.log(`  ${DASHBOARD_URL}/agents/${agentId}\n`);
+
+  console.log("─".repeat(50));
+  console.log("\nClaim your agent:\n");
+  console.log("  smoltbot claim\n");
+  console.log("  This links your agent to your Mnemom account so");
+  console.log("  you can manage traces and keep your data private.\n");
+  console.log(`  Or visit: ${DASHBOARD_URL}/claim/${agentId}\n`);
+
+  console.log("─".repeat(50));
+  console.log("\nUseful commands:\n");
+  console.log("  smoltbot status     - Check configuration and connectivity");
+  console.log("  smoltbot claim      - Claim agent and link to your account");
+  console.log("  smoltbot logs       - View recent traces");
+  console.log("  smoltbot integrity  - View integrity score\n");
+}
+
+// ============================================================================
+// OpenClaw flow — existing behavior (unchanged)
+// ============================================================================
+
+/**
+ * OpenClaw flow entry: detects OpenClaw, fails if not installed.
+ */
+async function openclawFlow(
+  options: InitOptions,
+  existingConfig: Config | null,
+): Promise<void> {
   console.log("Detecting OpenClaw installation...\n");
   const detection = detectProviders();
 
@@ -58,32 +319,39 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     console.log("\nInstall OpenClaw first: https://openclaw.ai\n");
     process.exit(1);
   }
+
+  return openclawFlowWithDetection(options, existingConfig, detection);
+}
+
+/**
+ * OpenClaw flow with pre-detected result. This is the original initCommand logic.
+ */
+async function openclawFlowWithDetection(
+  options: InitOptions,
+  existingConfig: Config | null,
+  detection: ProviderDetectionResult,
+): Promise<void> {
   console.log("✓ OpenClaw installation detected\n");
 
-  // Step 3: Scan all providers for API keys
+  // Scan all providers for API keys
   const availableProviders: { provider: Provider; apiKey: string }[] = [];
-  const providerLabels: Record<Provider, string> = {
-    anthropic: "Anthropic",
-    openai: "OpenAI",
-    gemini: "Gemini",
-  };
 
   for (const provider of ["anthropic", "openai", "gemini"] as Provider[]) {
     const info = detection.providers[provider];
     if (info.isOAuth) {
-      console.log(`  ${providerLabels[provider]}: OAuth detected (not supported, skipping)`);
+      console.log(`  ${PROVIDER_LABELS[provider]}: OAuth detected (not supported, skipping)`);
     } else if (info.invalidFormat) {
-      console.log(`  ${providerLabels[provider]}: Invalid API key format (skipping)`);
+      console.log(`  ${PROVIDER_LABELS[provider]}: Invalid API key format (skipping)`);
     } else if (info.hasApiKey && info.apiKey) {
-      console.log(`✓ ${providerLabels[provider]} API key found`);
+      console.log(`✓ ${PROVIDER_LABELS[provider]} API key found`);
       availableProviders.push({ provider, apiKey: info.apiKey });
     } else {
-      console.log(`  ${providerLabels[provider]}: No API key found`);
+      console.log(`  ${PROVIDER_LABELS[provider]}: No API key found`);
     }
   }
   console.log();
 
-  // Step 3b: Require at least one provider to have an API key
+  // Require at least one provider
   if (availableProviders.length === 0) {
     console.log("✗ No provider API keys found\n");
     console.log("smoltbot requires at least one provider API key.");
@@ -97,16 +365,16 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
   console.log(`  ${availableProviders.length} provider(s) with API keys\n`);
 
-  // Step 3c: Verify each provider's API key
+  // Verify each provider's API key
   const verifiedProviders: { provider: Provider; apiKey: string }[] = [];
 
   for (const { provider, apiKey } of availableProviders) {
-    console.log(`Verifying ${providerLabels[provider]} API key...`);
+    console.log(`Verifying ${PROVIDER_LABELS[provider]} API key...`);
     const verification = await verifyProviderApiKey(provider, apiKey);
     if (!verification.valid) {
-      console.log(`  ✗ ${verification.error} (skipping ${providerLabels[provider]})\n`);
+      console.log(`  ✗ ${verification.error} (skipping ${PROVIDER_LABELS[provider]})\n`);
     } else {
-      console.log(`✓ ${providerLabels[provider]} API key verified\n`);
+      console.log(`✓ ${PROVIDER_LABELS[provider]} API key verified\n`);
       verifiedProviders.push({ provider, apiKey });
     }
   }
@@ -118,7 +386,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     process.exit(1);
   }
 
-  // Step 4: Detect current model
+  // Detect current model
   const { modelId, provider: currentProvider } = parseCurrentModel(detection);
 
   if (!modelId) {
@@ -131,7 +399,7 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   console.log(`✓ Current model: ${currentProvider}/${modelId}`);
   console.log(`  (${formatModelName(modelId)})\n`);
 
-  // Step 5: Determine models to add per provider
+  // Determine models to add per provider
   const verifiedProviderSet = new Set(verifiedProviders.map((p) => p.provider));
   const modelsPerProvider = determineModelsToAdd(modelId, detection, verifiedProviderSet);
 
@@ -145,19 +413,18 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
   }
   console.log();
 
-  // Step 6: Configure all providers that have verified keys
+  // Configure all providers that have verified keys
   const alreadyConfigured = detection.smoltbotConfiguredProviders;
   if (alreadyConfigured.length > 0 && !options.force) {
-    const configuredNames = alreadyConfigured.map((p) => providerLabels[p]).join(", ");
+    const configuredNames = alreadyConfigured.map((p) => PROVIDER_LABELS[p]).join(", ");
     console.log(`⚠ smoltbot already configured for: ${configuredNames}\n`);
     if (isInteractive() && !options.yes) {
       const reconfigure = await askYesNo("Reconfigure smoltbot providers?", true);
       if (!reconfigure) {
         console.log("\nKeeping existing configuration.\n");
-        // Still create/update smoltbot config
         const firstApiKey = verifiedProviders[0]?.apiKey;
         const agentId = await createSmoltbotConfig(existingConfig, firstApiKey);
-        showSuccessMessage(agentId, modelId, currentProvider, verifiedProviders.map((p) => p.provider), modelsPerProvider);
+        showOpenClawSuccessMessage(agentId, modelId, currentProvider, verifiedProviders.map((p) => p.provider), modelsPerProvider);
         return;
       }
     }
@@ -176,11 +443,11 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
 
   const configuredProviders = configureSmoltbotProviders(providerKeys);
   for (const provider of configuredProviders) {
-    console.log(`✓ ${providerLabels[provider]} provider configured (${PROVIDER_CONFIG_KEYS[provider]})`);
+    console.log(`✓ ${PROVIDER_LABELS[provider]} provider configured (${PROVIDER_CONFIG_KEYS[provider]})`);
   }
   console.log();
 
-  // Step 7: Offer to switch default model (showing options from all configured providers)
+  // Offer to switch default model
   const modelProvider = detectProvider(modelId);
   const smoltbotConfigKey = modelProvider ? PROVIDER_CONFIG_KEYS[modelProvider] : PROVIDER_CONFIG_KEYS.anthropic;
   const smoltbotModelPath = `${smoltbotConfigKey}/${modelId}`;
@@ -209,23 +476,25 @@ export async function initCommand(options: InitOptions = {}): Promise<void> {
     }
   }
 
-  // Step 8: Create smoltbot config (use first available API key for agent ID derivation)
+  // Create smoltbot config
   const firstApiKey = verifiedProviders[0]?.apiKey;
   const agentId = await createSmoltbotConfig(existingConfig, firstApiKey);
 
-  // Step 9: Show success with all configured providers listed
+  // Show success
   const tracedModeActive = shouldSwitch || alreadyUsingSmoltbot;
-  showSuccessMessage(agentId, modelId, currentProvider, configuredProviders, modelsPerProvider, tracedModeActive);
+  showOpenClawSuccessMessage(agentId, modelId, currentProvider, configuredProviders, modelsPerProvider, tracedModeActive);
 
-  // Trigger model cache refresh in background (non-blocking)
-  refreshModelCache().catch(() => {
-    // Silently ignore cache refresh errors
-  });
+  // Trigger model cache refresh in background
+  refreshModelCache().catch(() => {});
 }
 
+// ============================================================================
+// Shared helpers
+// ============================================================================
+
 /**
- * Handle existing smoltbot config
- * Returns "abort" if user doesn't want to reconfigure, or the existing config
+ * Handle existing smoltbot config.
+ * Returns "abort" if user doesn't want to reconfigure, or the existing config.
  */
 async function handleExistingConfig(
   options: InitOptions
@@ -262,7 +531,6 @@ async function handleExistingConfig(
 
 /**
  * Parse the current model from detection results.
- * Handles all providers (not just Anthropic).
  */
 function parseCurrentModel(detection: ProviderDetectionResult): {
   modelId: string | null;
@@ -271,14 +539,11 @@ function parseCurrentModel(detection: ProviderDetectionResult): {
   let modelId = detection.currentModelId || null;
   let provider = detection.currentProvider || null;
 
-  // If current model is already a smoltbot provider, keep the underlying model ID
   if (provider && Object.values(PROVIDER_CONFIG_KEYS).includes(provider)) {
-    // The model is already using a smoltbot provider, that's fine
-    // modelId should be the actual model ID
+    // Already using a smoltbot provider
   } else if (!provider && modelId) {
-    // No provider prefix — detect from model ID
     const detected = detectProvider(modelId);
-    provider = detected || "anthropic"; // fall back to anthropic for backward compat
+    provider = detected || "anthropic";
   }
 
   return { modelId, provider };
@@ -286,7 +551,6 @@ function parseCurrentModel(detection: ProviderDetectionResult): {
 
 /**
  * Determine which models to add per provider.
- * Returns a record mapping each provider to its list of model definitions.
  */
 function determineModelsToAdd(
   currentModelId: string,
@@ -301,12 +565,10 @@ function determineModelsToAdd(
 
   const latestModels = getLatestModels();
 
-  // For each verified provider, add its latest models
   for (const provider of verifiedProviders) {
     const addedIds = new Set<string>();
     const models: ModelDefinition[] = [];
 
-    // If the current model belongs to this provider, ensure it's included first
     const currentModelProvider = detectProvider(currentModelId);
     if (currentModelProvider === provider) {
       const modelDef = getModelDefinition(currentModelId);
@@ -314,7 +576,6 @@ function determineModelsToAdd(
       addedIds.add(currentModelId);
     }
 
-    // Add latest models for this provider
     for (const model of latestModels[provider]) {
       if (!addedIds.has(model.id)) {
         models.push(model);
@@ -329,8 +590,7 @@ function determineModelsToAdd(
 }
 
 /**
- * Prompt user to switch default model.
- * Now shows options from all configured providers.
+ * Prompt user to switch default model (OpenClaw flow only).
  */
 async function promptModelSwitch(
   modelId: string,
@@ -340,15 +600,8 @@ async function promptModelSwitch(
   modelsPerProvider: Record<Provider, ModelDefinition[]>,
   options: InitOptions
 ): Promise<boolean> {
-  // If --yes flag, default to switching
-  if (options.yes) {
-    return true;
-  }
-
-  // If non-interactive, default to switching
-  if (!isInteractive()) {
-    return true;
-  }
+  if (options.yes) return true;
+  if (!isInteractive()) return true;
 
   console.log("─".repeat(50));
   console.log("\nSwitch to traced mode now?");
@@ -359,16 +612,11 @@ async function promptModelSwitch(
 
   if (configuredProviders.length > 1) {
     console.log("Available traced models across providers:");
-    const providerLabels: Record<Provider, string> = {
-      anthropic: "Anthropic",
-      openai: "OpenAI",
-      gemini: "Gemini",
-    };
     for (const provider of configuredProviders) {
       const models = modelsPerProvider[provider] || [];
       if (models.length > 0) {
         const configKey = PROVIDER_CONFIG_KEYS[provider];
-        console.log(`  ${providerLabels[provider]}:`);
+        console.log(`  ${PROVIDER_LABELS[provider]}:`);
         for (const model of models) {
           console.log(`    openclaw models set ${configKey}/${model.id}`);
         }
@@ -381,7 +629,7 @@ async function promptModelSwitch(
 }
 
 /**
- * Create or update smoltbot config
+ * Create or update smoltbot config (OpenClaw flow).
  */
 async function createSmoltbotConfig(
   existingConfig: Config | null,
@@ -405,9 +653,9 @@ async function createSmoltbotConfig(
 }
 
 /**
- * Show success message with all configured providers listed.
+ * Show success message for OpenClaw flow.
  */
-function showSuccessMessage(
+function showOpenClawSuccessMessage(
   agentId: string,
   modelId: string,
   currentProvider: string | null,
@@ -415,25 +663,18 @@ function showSuccessMessage(
   modelsPerProvider: Record<Provider, ModelDefinition[]>,
   switched: boolean = true
 ): void {
-  const providerLabels: Record<Provider, string> = {
-    anthropic: "Anthropic",
-    openai: "OpenAI",
-    gemini: "Gemini",
-  };
-
   console.log("=".repeat(60));
   console.log("  smoltbot initialized successfully!");
   console.log("=".repeat(60) + "\n");
 
   console.log(`Agent ID: ${agentId}\n`);
 
-  // List all configured providers
   console.log("Configured providers:");
   for (const provider of configuredProviders) {
     const configKey = PROVIDER_CONFIG_KEYS[provider];
     const models = modelsPerProvider[provider] || [];
     const modelNames = models.map((m) => m.name).join(", ");
-    console.log(`  ✓ ${providerLabels[provider]} (${configKey}) — ${modelNames}`);
+    console.log(`  ✓ ${PROVIDER_LABELS[provider]} (${configKey}) — ${modelNames}`);
   }
   console.log();
 
@@ -469,22 +710,24 @@ function showSuccessMessage(
   console.log("─".repeat(50));
   console.log("\nTo switch between traced and untraced mode:\n");
 
-  // Show switch commands for all configured providers
   for (const provider of configuredProviders) {
     const configKey = PROVIDER_CONFIG_KEYS[provider];
     const models = modelsPerProvider[provider] || [];
     if (models.length > 0) {
       const firstModel = models[0];
-      console.log(`  Traced (${providerLabels[provider]}):   openclaw models set ${configKey}/${firstModel.id}`);
-      console.log(`  Untraced (${providerLabels[provider]}): openclaw models set ${provider}/${firstModel.id}`);
+      console.log(`  Traced (${PROVIDER_LABELS[provider]}):   openclaw models set ${configKey}/${firstModel.id}`);
+      console.log(`  Untraced (${PROVIDER_LABELS[provider]}): openclaw models set ${provider}/${firstModel.id}`);
     }
   }
   console.log();
 }
 
+// ============================================================================
+// API key verification (shared by both flows)
+// ============================================================================
+
 /**
  * Verify an API key for a given provider.
- * Dispatches to provider-specific verification logic.
  * Fail-open: network errors and 5xx responses don't block init.
  */
 async function verifyProviderApiKey(
@@ -503,10 +746,6 @@ async function verifyProviderApiKey(
   }
 }
 
-/**
- * Verify an Anthropic API key by making a minimal API call.
- * Fail-open: network errors and 5xx responses don't block init.
- */
 async function verifyAnthropicApiKey(apiKey: string): Promise<{ valid: boolean; error?: string }> {
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -535,19 +774,13 @@ async function verifyAnthropicApiKey(apiKey: string): Promise<{ valid: boolean; 
       };
     }
 
-    // Other errors (500, etc.) — don't block init
     return { valid: true };
   } catch {
-    // Network error or timeout — don't block init
     console.log("  Could not verify API key (network error). Proceeding anyway.\n");
     return { valid: true };
   }
 }
 
-/**
- * Verify an OpenAI API key by making a minimal API call.
- * Fail-open: network errors and 5xx responses don't block init.
- */
 async function verifyOpenAIApiKey(apiKey: string): Promise<{ valid: boolean; error?: string }> {
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -575,19 +808,13 @@ async function verifyOpenAIApiKey(apiKey: string): Promise<{ valid: boolean; err
       };
     }
 
-    // Other errors (500, etc.) — don't block init
     return { valid: true };
   } catch {
-    // Network error or timeout — don't block init
     console.log("  Could not verify API key (network error). Proceeding anyway.\n");
     return { valid: true };
   }
 }
 
-/**
- * Verify a Gemini API key by making a minimal API call.
- * Fail-open: network errors and 5xx responses don't block init.
- */
 async function verifyGeminiApiKey(apiKey: string): Promise<{ valid: boolean; error?: string }> {
   try {
     const response = await fetch(
@@ -616,10 +843,8 @@ async function verifyGeminiApiKey(apiKey: string): Promise<{ valid: boolean; err
       };
     }
 
-    // Other errors (500, etc.) — don't block init
     return { valid: true };
   } catch {
-    // Network error or timeout — don't block init
     console.log("  Could not verify API key (network error). Proceeding anyway.\n");
     return { valid: true };
   }
