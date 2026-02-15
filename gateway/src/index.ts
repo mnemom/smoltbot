@@ -500,6 +500,68 @@ async function storeCheckpoint(
   }
 }
 
+/**
+ * Submit a metering event for billing. Non-blocking, fail-open.
+ */
+async function submitMeteringEvent(
+  agentId: string,
+  checkpointId: string,
+  source: string,
+  env: Env
+): Promise<void> {
+  try {
+    // Resolve agent → billing account
+    const rpcResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/get_billing_account_for_agent`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_agent_id: agentId }),
+    });
+
+    if (!rpcResponse.ok) {
+      console.warn(`[gateway/metering] Failed to resolve billing account for agent ${agentId}`);
+      return;
+    }
+
+    const result = (await rpcResponse.json()) as { account_id: string | null };
+    if (!result.account_id) return;
+
+    // Generate event ID
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let eventIdSuffix = '';
+    for (let i = 0; i < 8; i++) {
+      eventIdSuffix += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+
+    // Insert metering event
+    const insertResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/metering_events`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        event_id: `me-${eventIdSuffix}`,
+        account_id: result.account_id,
+        agent_id: agentId,
+        event_type: 'integrity_check',
+        metadata: { checkpoint_id: checkpointId, source },
+      }),
+    });
+
+    if (!insertResponse.ok) {
+      console.warn(`[gateway/metering] Failed to insert metering event: ${insertResponse.status}`);
+    }
+  } catch (error) {
+    console.warn('[gateway/metering] Error submitting metering event:', error);
+  }
+}
+
 // ============================================================================
 // Wave 3: Conscience Nudge Functions
 // ============================================================================
@@ -1415,8 +1477,9 @@ export async function handleProviderProxy(
       responseHeaders.set('X-AIP-Action', signal.recommended_action);
       responseHeaders.set('X-AIP-Proceed', String(signal.proceed));
 
-      // Background: store checkpoint, deliver webhooks, flush OTel
+      // Background: store checkpoint, deliver webhooks, meter, flush OTel
       ctx.waitUntil(storeCheckpoint(checkpoint, 'gateway', env));
+      ctx.waitUntil(submitMeteringEvent(agent.id, checkpoint.checkpoint_id, 'gateway', env));
       ctx.waitUntil(deliverWebhooks(checkpoint, env));
       if (otelExporter) {
         ctx.waitUntil(otelExporter.flush());

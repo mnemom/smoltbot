@@ -125,6 +125,9 @@ export default {
       // Expire stale nudges (>4h old pending nudges)
       ctx.waitUntil(expireStaleNudges(env));
 
+      // Roll up metering events for billing (idempotent, safe every tick)
+      ctx.waitUntil(triggerMeteringRollup(env));
+
       // Flush OTel spans for all processed logs in one batch
       if (otelExporter) {
         ctx.waitUntil(otelExporter.flush());
@@ -405,6 +408,7 @@ async function processLog(
     aipSignal.checkpoint.agent_id = agent_id;
     aipSignal.checkpoint.linked_trace_id = trace.trace_id;
     ctx.waitUntil(submitCheckpoint(aipSignal.checkpoint, env));
+    ctx.waitUntil(submitMeteringEvent(agent_id, aipSignal.checkpoint.checkpoint_id, 'observer', env));
 
     // Create pending nudge for boundary violations (if enforcement mode is nudge/enforce)
     if (aipSignal.checkpoint.verdict === 'boundary_violation') {
@@ -1462,6 +1466,119 @@ async function submitCheckpoint(
     }
   } catch (error) {
     console.error('[observer/aip] Error submitting checkpoint:', error);
+  }
+}
+
+/**
+ * Submit a metering event for billing. Non-blocking, fail-open.
+ */
+async function submitMeteringEvent(
+  agentId: string,
+  checkpointId: string,
+  source: string,
+  env: Env
+): Promise<void> {
+  try {
+    // Resolve agent → billing account
+    const rpcResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/get_billing_account_for_agent`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_agent_id: agentId }),
+    });
+
+    if (!rpcResponse.ok) {
+      console.warn(`[observer/metering] Failed to resolve billing account for agent ${agentId}`);
+      return;
+    }
+
+    const result = (await rpcResponse.json()) as { account_id: string | null };
+    if (!result.account_id) return;
+
+    // Generate event ID
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let eventIdSuffix = '';
+    for (let i = 0; i < 8; i++) {
+      eventIdSuffix += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+
+    // Insert metering event
+    const insertResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/metering_events`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        event_id: `me-${eventIdSuffix}`,
+        account_id: result.account_id,
+        agent_id: agentId,
+        event_type: 'integrity_check',
+        metadata: { checkpoint_id: checkpointId, source },
+      }),
+    });
+
+    if (!insertResponse.ok) {
+      console.warn(`[observer/metering] Failed to insert metering event: ${insertResponse.status}`);
+    }
+  } catch (error) {
+    console.warn('[observer/metering] Error submitting metering event:', error);
+  }
+}
+
+/**
+ * Trigger metering rollup for all active billing accounts.
+ * Idempotent — upsert-based, safe to run on every cron tick.
+ */
+async function triggerMeteringRollup(env: Env): Promise<void> {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+
+    // Get all billing accounts that have metering events today
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/metering_events?select=account_id&timestamp=gte.${today}T00:00:00Z&order=account_id`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(`[observer/metering] Failed to fetch accounts for rollup: ${response.status}`);
+      return;
+    }
+
+    const events = (await response.json()) as Array<{ account_id: string }>;
+    const accountIds = [...new Set(events.map(e => e.account_id))];
+
+    for (const accountId of accountIds) {
+      const rollupResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/rollup_metering`, {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ p_account_id: accountId, p_date: today }),
+      });
+
+      if (!rollupResponse.ok) {
+        console.warn(`[observer/metering] Rollup failed for account ${accountId}: ${rollupResponse.status}`);
+      }
+    }
+
+    if (accountIds.length > 0) {
+      console.log(`[observer/metering] Rolled up ${accountIds.length} accounts for ${today}`);
+    }
+  } catch (error) {
+    console.warn('[observer/metering] Error in metering rollup:', error);
   }
 }
 
