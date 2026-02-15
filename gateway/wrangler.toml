@@ -18,7 +18,7 @@ BILLING_ENFORCEMENT_ENABLED = "true"
 # Then fill in the id below. Preview namespace: wrangler kv:namespace create BILLING_CACHE --preview
 [[kv_namespaces]]
 binding = "BILLING_CACHE"
-id = "REPLACE_WITH_NAMESPACE_ID"
+id = "d13bd450c5ab4a2c9766f2dc26ce513c"
 
 # Secrets (set via wrangler secret put):
 # SUPABASE_URL
