@@ -42,12 +42,27 @@
 
 import { detectDrift, verifyTrace, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
 import { DEFAULT_CONSCIENCE_VALUES } from '@mnemom/agent-integrity-protocol';
+import {
+  handleStripeWebhook,
+  handleCheckout,
+  handlePortal,
+  handleGetSubscription,
+  handleCancel,
+  handleReactivate,
+  handleChangePlan,
+  handleListInvoices,
+  cancelStripeSubscriptionForAccount,
+} from './billing/handlers';
+import type { BillingEnv } from './billing/types';
 
 export interface Env {
   SUPABASE_URL: string;
   SUPABASE_KEY: string;
   SUPABASE_JWT_SECRET: string;
   MNEMOM_PUBLISH_KEY: string;
+  STRIPE_SECRET_KEY: string;
+  STRIPE_WEBHOOK_SECRET: string;
+  RESEND_API_KEY: string;
 }
 
 // CORS headers for all responses
@@ -1472,6 +1487,14 @@ async function handleDeleteAccount(env: Env, request: Request): Promise<Response
   const user = await getAuthUser(request, env);
   if (!user) {
     return errorResponse('Authentication required', 401);
+  }
+
+  // Cancel any active Stripe subscription before deletion
+  try {
+    await cancelStripeSubscriptionForAccount(env as unknown as BillingEnv, user.sub);
+  } catch (err) {
+    console.warn('[delete-account] Failed to cancel Stripe subscription:', err);
+    // Continue with deletion — don't block on Stripe failure
   }
 
   // Unlink all agents owned by this user
@@ -3350,6 +3373,50 @@ export default {
       // GET /v1/plans (public)
       if (path === '/v1/plans' && method === 'GET') {
         return handleListPublicPlans(env);
+      }
+
+      // ============================================
+      // STRIPE BILLING ROUTES
+      // ============================================
+
+      // POST /v1/billing/webhooks/stripe (Stripe signature auth, no JWT)
+      if (path === '/v1/billing/webhooks/stripe' && method === 'POST') {
+        return handleStripeWebhook(env as unknown as BillingEnv, request);
+      }
+
+      // POST /v1/billing/checkout
+      if (path === '/v1/billing/checkout' && method === 'POST') {
+        return handleCheckout(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // POST /v1/billing/portal
+      if (path === '/v1/billing/portal' && method === 'POST') {
+        return handlePortal(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // GET /v1/billing/subscription
+      if (path === '/v1/billing/subscription' && method === 'GET') {
+        return handleGetSubscription(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // POST /v1/billing/cancel
+      if (path === '/v1/billing/cancel' && method === 'POST') {
+        return handleCancel(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // POST /v1/billing/reactivate
+      if (path === '/v1/billing/reactivate' && method === 'POST') {
+        return handleReactivate(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // POST /v1/billing/change-plan
+      if (path === '/v1/billing/change-plan' && method === 'POST') {
+        return handleChangePlan(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // GET /v1/billing/invoices
+      if (path === '/v1/billing/invoices' && method === 'GET') {
+        return handleListInvoices(env as unknown as BillingEnv, request, getAuthUser as any);
       }
 
       // GET /v1/billing/me (authenticated)

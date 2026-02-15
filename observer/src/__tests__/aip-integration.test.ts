@@ -98,15 +98,19 @@ function createMockAnalysisResponse(
   };
 }
 
-/** Anthropic-format response body with a thinking block */
+/** Anthropic-format response body with a thinking block.
+ *  AIP SDK v0.1.7+ requires ≥100 tokens in the thinking block to trigger
+ *  analysis (below that it returns a synthetic clear). We pad short inputs
+ *  with filler reasoning so tests always hit the real analysis path. */
 function createMockProviderResponse(thinking: string, text: string) {
+  const padding = ' I need to carefully consider the values declared in my alignment card and ensure my reasoning is consistent with transparency, accuracy, helpfulness, and safety. Let me evaluate each dimension of this request thoroughly before formulating my response, weighing the tradeoffs between different approaches and checking for potential boundary concerns. I should also reflect on whether my intended action falls within the bounded actions specified in my autonomy envelope and whether any escalation triggers apply to this situation. This careful deliberation is essential for maintaining integrity.';
   return JSON.stringify({
     id: 'msg_mock_response',
     type: 'message',
     role: 'assistant',
     model: 'claude-3-5-sonnet-20241022',
     content: [
-      { type: 'thinking', thinking },
+      { type: 'thinking', thinking: thinking + padding },
       { type: 'text', text },
     ],
     stop_reason: 'end_turn',

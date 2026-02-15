@@ -9,3 +9,8 @@ routes = [
 ]
 
 workers_dev = true
+
+# Secrets (set via wrangler secret put):
+# STRIPE_SECRET_KEY      (Stripe API secret key)
+# STRIPE_WEBHOOK_SECRET  (Stripe webhook signing secret)
+# RESEND_API_KEY         (Resend email API key)
