@@ -308,7 +308,7 @@ describe('feature-gate', () => {
       const result = await requireFeature(env as any, 'user-123', 'otel_export');
       expect(result).not.toBeNull();
       expect(result!.status).toBe(403);
-      const body = await result!.json();
+      const body = await result!.json() as Record<string, unknown>;
       expect(body.error).toBe('feature_gated');
       expect(body.feature).toBe('otel_export');
     });
@@ -348,9 +348,9 @@ describe('feature-gate', () => {
 
       const res = await handleGetFeatures(env as any, req, mockGetAuth);
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.plan_id).toBe('plan-team');
-      expect(body.feature_flags.otel_export).toBe(true);
+      expect((body.feature_flags as Record<string, boolean>).otel_export).toBe(true);
       expect(body.check_count_this_period).toBe(42);
       expect(body.included_checks).toBe(15000);
     });
@@ -444,7 +444,7 @@ describe('handlers', () => {
       const req = makeRequest('/v1/billing/checkout', { method: 'POST', body: JSON.stringify({ plan_id: 'plan-enterprise' }) });
       const res = await handleCheckout(env as any, req, mockGetAuth);
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.action).toBe('contact_sales');
     });
 
@@ -468,7 +468,7 @@ describe('handlers', () => {
       const req = makeRequest('/v1/billing/subscription');
       const res = await handleGetSubscription(env as any, req, mockGetAuth);
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.subscription).toBeNull();
       expect(body.plan_id).toBe('plan-free');
     });
@@ -519,7 +519,7 @@ describe('handlers', () => {
       const env = makeEnv();
       const req = makeRequest('/v1/billing/change-plan', { method: 'POST', body: JSON.stringify({ plan_id: 'plan-enterprise' }) });
       const res = await handleChangePlan(env as any, req, mockGetAuth);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.action).toBe('contact_sales');
     });
 
@@ -541,7 +541,7 @@ describe('handlers', () => {
       const req = makeRequest('/v1/billing/invoices');
       const res = await handleListInvoices(env as any, req, mockGetAuth);
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.invoices).toEqual([]);
     });
   });
@@ -565,9 +565,10 @@ describe('handlers', () => {
       const req = makeRequest('/v1/billing/usage?days=999');
       const res = await handleGetMyUsage(env as any, req, mockGetAuth);
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.summary.checks_used).toBe(500);
-      expect(body.summary.overage).toBe(0);
+      const body = await res.json() as Record<string, unknown>;
+      const summary = body.summary as Record<string, unknown>;
+      expect(summary.checks_used).toBe(500);
+      expect(summary.overage).toBe(0);
     });
   });
 
@@ -616,7 +617,7 @@ describe('handlers', () => {
       const req = makeRequest('/v1/billing/budget-alert');
       const res = await handleGetBudgetAlert(env as any, req, mockGetAuth);
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.threshold_cents).toBe(5000);
     });
   });
@@ -644,7 +645,7 @@ describe('handlers', () => {
       });
       const res = await handleSetBudgetAlert(env as any, req, mockGetAuth);
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.updated).toBe(true);
       expect(body.threshold_cents).toBeNull();
     });
@@ -709,7 +710,7 @@ describe('api-keys', () => {
       const req = makeRequest('/v1/api-keys', { method: 'POST', body: JSON.stringify({ name: 'My Key' }) });
       const res = await handleCreateApiKey(env as any, req, mockGetAuth);
       expect(res.status).toBe(201);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.key).toMatch(/^mnm_/);
       expect(body.key_prefix).toMatch(/^mnm_/);
       expect(body.name).toBe('My Key');
@@ -726,7 +727,7 @@ describe('api-keys', () => {
       const req = makeRequest('/v1/api-keys', { method: 'POST' });
       const res = await handleCreateApiKey(env as any, req, mockGetAuth);
       expect(res.status).toBe(201);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.name).toBe('Default');
     });
 
@@ -740,8 +741,8 @@ describe('api-keys', () => {
       const longName = 'a'.repeat(200);
       const req = makeRequest('/v1/api-keys', { method: 'POST', body: JSON.stringify({ name: longName }) });
       const res = await handleCreateApiKey(env as any, req, mockGetAuth);
-      const body = await res.json();
-      expect(body.name.length).toBe(100);
+      const body = await res.json() as Record<string, unknown>;
+      expect((body.name as string).length).toBe(100);
     });
   });
 
@@ -763,9 +764,10 @@ describe('api-keys', () => {
       const req = makeRequest('/v1/api-keys');
       const res = await handleListApiKeys(env as any, req, mockGetAuth);
       expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.keys).toHaveLength(1);
-      expect(body.keys[0].key_id).toBe('mk-1');
+      const body = await res.json() as Record<string, unknown>;
+      const resultKeys = body.keys as Array<Record<string, unknown>>;
+      expect(resultKeys).toHaveLength(1);
+      expect(resultKeys[0].key_id).toBe('mk-1');
     });
   });
 
@@ -796,7 +798,7 @@ describe('api-keys', () => {
       const req = makeRequest('/v1/api-keys/mk-1', { method: 'DELETE' });
       const res = await handleRevokeApiKey(env as any, req, mockGetAuth, 'mk-1');
       expect(res.status).toBe(200);
-      const body = await res.json();
+      const body = await res.json() as Record<string, unknown>;
       expect(body.revoked).toBe(true);
       expect(body.key_id).toBe('mk-1');
 
