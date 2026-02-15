@@ -1605,7 +1605,7 @@ async function reportDailyUsageToStripe(env: Env): Promise<void> {
     // Import Stripe dynamically to avoid import errors when key is not set
     const { default: Stripe } = await import('stripe');
     const stripe = new Stripe(env.STRIPE_SECRET_KEY, {
-      apiVersion: '2025-01-27.acacia',
+      apiVersion: '2026-01-28.clover',
       httpClient: Stripe.createFetchHttpClient(),
     });
 
@@ -1639,7 +1639,7 @@ async function reportDailyUsageToStripe(env: Env): Promise<void> {
       const idempotencyKey = `${account.account_id}-${today}`;
 
       try {
-        await stripe.subscriptionItems.createUsageRecord(
+        await (stripe as any).subscriptionItems.createUsageRecord(
           account.stripe_subscription_item_id,
           {
             quantity,

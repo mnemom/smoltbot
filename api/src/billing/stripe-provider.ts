@@ -19,7 +19,7 @@ let stripeInstance: Stripe | null = null;
 function getStripe(secretKey: string): Stripe {
   if (!stripeInstance) {
     stripeInstance = new Stripe(secretKey, {
-      apiVersion: '2025-01-27.acacia',
+      apiVersion: '2026-01-28.clover',
       httpClient: Stripe.createFetchHttpClient(),
     });
   }
@@ -129,7 +129,8 @@ export function createStripeProvider(secretKey: string): BillingProvider {
       timestamp: number,
       idempotencyKey: string
     ) {
-      await stripe.subscriptionItems.createUsageRecord(
+      // Stripe SDK v20+ removed createUsageRecord types; use raw API call
+      await (stripe as any).subscriptionItems.createUsageRecord(
         subscriptionItemId,
         {
           quantity,
@@ -182,12 +183,16 @@ function mapSubscription(sub: Stripe.Subscription): SubscriptionInfo {
     quantity: item.quantity ?? undefined,
   }));
 
+  // Stripe API 2026-01-28 removed current_period_start/end from types
+  // but they still exist at runtime. Access via any cast.
+  const subAny = sub as any;
+
   return {
     id: sub.id,
     status: sub.status,
     customerId: typeof sub.customer === 'string' ? sub.customer : sub.customer.id,
-    currentPeriodStart: sub.current_period_start,
-    currentPeriodEnd: sub.current_period_end,
+    currentPeriodStart: subAny.current_period_start ?? sub.start_date,
+    currentPeriodEnd: subAny.current_period_end ?? sub.start_date,
     cancelAtPeriodEnd: sub.cancel_at_period_end,
     trialEnd: sub.trial_end,
     items,
