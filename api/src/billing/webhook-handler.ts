@@ -438,6 +438,7 @@ async function handleInvoicePaid(
     check_count_this_period: 0,
     current_period_start: new Date(periodStart * 1000).toISOString(),
     current_period_end: new Date(periodEnd * 1000).toISOString(),
+    past_due_since: null,  // Phase 3: clear grace period
     updated_at: new Date().toISOString(),
   });
 
@@ -473,6 +474,7 @@ async function handleInvoicePaymentFailed(
   // Set past_due
   await supabaseUpdate(env, 'billing_accounts', { account_id: accountId }, {
     subscription_status: 'past_due',
+    past_due_since: new Date().toISOString(),  // Phase 3: track grace period start
     updated_at: new Date().toISOString(),
   });
 

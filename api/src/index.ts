@@ -53,6 +53,8 @@ import {
   handleListInvoices,
   cancelStripeSubscriptionForAccount,
 } from './billing/handlers';
+import { handleGetFeatures, requireFeature } from './billing/feature-gate';
+import { handleCreateApiKey, handleListApiKeys, handleRevokeApiKey } from './billing/api-keys';
 import type { BillingEnv } from './billing/types';
 
 export interface Env {
@@ -3424,6 +3426,31 @@ export default {
         return handleGetMyBilling(env, request);
       }
 
+      // GET /v1/billing/features (authenticated)
+      if (path === '/v1/billing/features' && method === 'GET') {
+        return handleGetFeatures(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // ============================================
+      // API KEY ROUTES
+      // ============================================
+
+      // POST /v1/api-keys
+      if (path === '/v1/api-keys' && method === 'POST') {
+        return handleCreateApiKey(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // GET /v1/api-keys
+      if (path === '/v1/api-keys' && method === 'GET') {
+        return handleListApiKeys(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // DELETE /v1/api-keys/:key_id
+      const apiKeyDeleteMatch = path.match(/^\/v1\/api-keys\/([^/]+)$/);
+      if (apiKeyDeleteMatch && method === 'DELETE') {
+        return handleRevokeApiKey(env as unknown as BillingEnv, request, getAuthUser as any, apiKeyDeleteMatch[1]);
+      }
+
       // GET /v1/auth/me
       if (path === '/v1/auth/me' && method === 'GET') {
         return handleGetMe(env, request);
@@ -3551,8 +3578,13 @@ export default {
         return handleGetAipDrift(env, aipDriftMatch[1]);
       }
 
-      // POST /v1/aip/webhooks - Register AIP webhook
+      // POST /v1/aip/webhooks - Register AIP webhook (requires managed_gateway)
       if (path === '/v1/aip/webhooks' && method === 'POST') {
+        const user = await getAuthUser(request, env);
+        if (user) {
+          const gateResponse = await requireFeature(env as unknown as BillingEnv, user.sub, 'managed_gateway');
+          if (gateResponse) return gateResponse;
+        }
         return handleRegisterAipWebhook(env, request);
       }
 
