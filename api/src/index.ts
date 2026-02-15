@@ -1443,6 +1443,12 @@ async function handleGetMe(env: Env, request: Request): Promise<Response> {
     return errorResponse('Authentication required', 401);
   }
 
+  // Auto-create billing account on free plan if not exists
+  const { data: billingResult } = await supabaseRpc(env, 'ensure_billing_account', {
+    p_user_id: user.sub,
+    p_email: user.email ?? '',
+  });
+
   const { data: agents, error } = await supabaseQuery(env, 'agents', {
     filters: { user_id: user.sub },
   });
@@ -1451,10 +1457,14 @@ async function handleGetMe(env: Env, request: Request): Promise<Response> {
     return errorResponse(`Database error: ${error}`, 500);
   }
 
+  const billing = billingResult as Record<string, unknown> | null;
+
   return jsonResponse({
     user_id: user.sub,
     email: user.email,
     agents: agents || [],
+    billing_account_id: billing?.account_id ?? null,
+    plan_id: billing?.plan_id ?? null,
   });
 }
 
@@ -2978,6 +2988,313 @@ async function handleGetResolutions(env: Env, agentId: string): Promise<Response
   return jsonResponse({ resolutions: data ?? [] });
 }
 
+// ============================================
+// PLAN MANAGEMENT HANDLERS
+// ============================================
+
+async function handleAdminListPlans(env: Env, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const { data, error } = await supabaseRpc(env, 'admin_list_plans');
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+
+  return jsonResponse({ plans: data ?? [] });
+}
+
+async function handleAdminCreatePlan(env: Env, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const body = await request.json() as Record<string, unknown>;
+  const planId = body.plan_id as string;
+
+  if (!planId || !/^plan-[a-z0-9-]+$/.test(planId)) {
+    return errorResponse('plan_id must match ^plan-[a-z0-9-]+$', 400);
+  }
+  if (!body.display_name) {
+    return errorResponse('display_name is required', 400);
+  }
+  if (!body.billing_model || !['none', 'metered', 'subscription', 'subscription_plus_metered'].includes(body.billing_model as string)) {
+    return errorResponse('billing_model must be one of: none, metered, subscription, subscription_plus_metered', 400);
+  }
+
+  const { data, error } = await supabaseInsert(env, 'plans', {
+    plan_id: planId,
+    display_name: body.display_name,
+    description: body.description ?? '',
+    billing_model: body.billing_model,
+    base_price_cents: body.base_price_cents ?? 0,
+    annual_price_cents: body.annual_price_cents ?? 0,
+    per_check_price: body.per_check_price ?? 0,
+    included_checks: body.included_checks ?? 0,
+    trace_retention_days: body.trace_retention_days ?? 30,
+    feature_flags: body.feature_flags ?? {},
+    limits: body.limits ?? {},
+    is_public: body.is_public ?? true,
+    sort_order: body.sort_order ?? 0,
+  });
+
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+  return jsonResponse(data, 201);
+}
+
+async function handleAdminUpdatePlan(env: Env, planId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const body = await request.json() as Record<string, unknown>;
+  // Remove plan_id from updates (immutable PK)
+  delete body.plan_id;
+  body.updated_at = new Date().toISOString();
+
+  const { data, error } = await supabaseUpdate(env, 'plans', { plan_id: planId }, body);
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+
+  return jsonResponse(data);
+}
+
+async function handleAdminClonePlan(env: Env, sourcePlanId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const body = await request.json() as { plan_id: string; display_name: string };
+  if (!body.plan_id || !/^plan-[a-z0-9-]+$/.test(body.plan_id)) {
+    return errorResponse('plan_id must match ^plan-[a-z0-9-]+$', 400);
+  }
+  if (!body.display_name) {
+    return errorResponse('display_name is required', 400);
+  }
+
+  // Fetch source plan
+  const { data: source, error: fetchError } = await supabaseQuery(env, 'plans', {
+    eq: ['plan_id', sourcePlanId],
+    single: true,
+  });
+  if (fetchError) return errorResponse(`Source plan not found: ${fetchError}`, 404);
+
+  const sourcePlan = source as Record<string, unknown>;
+  const { data, error } = await supabaseInsert(env, 'plans', {
+    plan_id: body.plan_id,
+    display_name: body.display_name,
+    description: sourcePlan.description,
+    billing_model: sourcePlan.billing_model,
+    base_price_cents: sourcePlan.base_price_cents,
+    annual_price_cents: sourcePlan.annual_price_cents,
+    per_check_price: sourcePlan.per_check_price,
+    included_checks: sourcePlan.included_checks,
+    trace_retention_days: sourcePlan.trace_retention_days,
+    feature_flags: sourcePlan.feature_flags,
+    limits: sourcePlan.limits,
+    is_public: false,
+    sort_order: (sourcePlan.sort_order as number) + 1,
+  });
+
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+  return jsonResponse(data, 201);
+}
+
+async function handleAdminArchivePlan(env: Env, planId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const { data, error } = await supabaseUpdate(env, 'plans', { plan_id: planId }, {
+    is_archived: true,
+    updated_at: new Date().toISOString(),
+  });
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+
+  return jsonResponse(data);
+}
+
+// ============================================
+// BILLING MANAGEMENT HANDLERS
+// ============================================
+
+async function handleAdminGetUserBilling(env: Env, userId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+
+  const { data, error } = await supabaseRpc(env, 'admin_get_billing_summary', { p_user_id: userId });
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+
+  const result = data as Record<string, unknown>;
+  if (result?.error === 'no_billing_account') {
+    return errorResponse('No billing account for this user', 404);
+  }
+
+  return jsonResponse(data);
+}
+
+async function handleAdminOverridePlan(env: Env, userId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+  const admin = adminOrError as JWTPayload;
+
+  const body = await request.json() as { plan_id: string; reason?: string };
+  if (!body.plan_id) return errorResponse('plan_id is required', 400);
+
+  // Get billing account
+  const { data: account, error: accError } = await supabaseQuery(env, 'billing_accounts', {
+    eq: ['user_id', userId],
+    single: true,
+  });
+  if (accError) return errorResponse(`User billing account not found: ${accError}`, 404);
+
+  const acc = account as Record<string, unknown>;
+  const oldPlanId = acc.plan_id;
+
+  // Update plan
+  const { error: updateError } = await supabaseUpdate(env, 'billing_accounts', { user_id: userId }, {
+    plan_id: body.plan_id,
+    updated_at: new Date().toISOString(),
+  });
+  if (updateError) return errorResponse(`Database error: ${updateError}`, 500);
+
+  // Log billing event
+  await supabaseInsert(env, 'billing_events', {
+    event_id: generateId('be'),
+    account_id: acc.account_id,
+    event_type: 'plan_override',
+    details: { old_plan_id: oldPlanId, new_plan_id: body.plan_id, reason: body.reason ?? '' },
+    performed_by: admin.sub,
+  });
+
+  return jsonResponse({ success: true, plan_id: body.plan_id });
+}
+
+async function handleAdminOverrideLimits(env: Env, userId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+  const admin = adminOrError as JWTPayload;
+
+  const body = await request.json() as { overage_threshold?: number | null; reason?: string };
+
+  const { data: account, error: accError } = await supabaseQuery(env, 'billing_accounts', {
+    eq: ['user_id', userId],
+    single: true,
+  });
+  if (accError) return errorResponse(`User billing account not found: ${accError}`, 404);
+
+  const acc = account as Record<string, unknown>;
+
+  const { error: updateError } = await supabaseUpdate(env, 'billing_accounts', { user_id: userId }, {
+    overage_threshold: body.overage_threshold ?? null,
+    updated_at: new Date().toISOString(),
+  });
+  if (updateError) return errorResponse(`Database error: ${updateError}`, 500);
+
+  await supabaseInsert(env, 'billing_events', {
+    event_id: generateId('be'),
+    account_id: acc.account_id,
+    event_type: 'limit_override',
+    details: { overage_threshold: body.overage_threshold, reason: body.reason ?? '' },
+    performed_by: admin.sub,
+  });
+
+  return jsonResponse({ success: true });
+}
+
+async function handleAdminApplyCredit(env: Env, userId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+  const admin = adminOrError as JWTPayload;
+
+  const body = await request.json() as { amount_cents: number; reason: string };
+  if (!body.amount_cents || !body.reason) {
+    return errorResponse('amount_cents and reason are required', 400);
+  }
+
+  const { data: account, error: accError } = await supabaseQuery(env, 'billing_accounts', {
+    eq: ['user_id', userId],
+    single: true,
+  });
+  if (accError) return errorResponse(`User billing account not found: ${accError}`, 404);
+
+  const acc = account as Record<string, unknown>;
+
+  await supabaseInsert(env, 'billing_events', {
+    event_id: generateId('be'),
+    account_id: acc.account_id,
+    event_type: 'credit_applied',
+    details: { amount_cents: body.amount_cents, reason: body.reason },
+    performed_by: admin.sub,
+  });
+
+  return jsonResponse({ success: true });
+}
+
+async function handleAdminExtendTrial(env: Env, userId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+  const admin = adminOrError as JWTPayload;
+
+  const body = await request.json() as { days: number; reason?: string };
+  if (!body.days || body.days < 1) {
+    return errorResponse('days is required and must be >= 1', 400);
+  }
+
+  const { data: account, error: accError } = await supabaseQuery(env, 'billing_accounts', {
+    eq: ['user_id', userId],
+    single: true,
+  });
+  if (accError) return errorResponse(`User billing account not found: ${accError}`, 404);
+
+  const acc = account as Record<string, unknown>;
+  const currentEnd = acc.trial_ends_at ? new Date(acc.trial_ends_at as string) : new Date();
+  const newEnd = new Date(currentEnd.getTime() + body.days * 24 * 60 * 60 * 1000);
+
+  const { error: updateError } = await supabaseUpdate(env, 'billing_accounts', { user_id: userId }, {
+    trial_ends_at: newEnd.toISOString(),
+    subscription_status: 'trialing',
+    updated_at: new Date().toISOString(),
+  });
+  if (updateError) return errorResponse(`Database error: ${updateError}`, 500);
+
+  await supabaseInsert(env, 'billing_events', {
+    event_id: generateId('be'),
+    account_id: acc.account_id,
+    event_type: 'trial_extended',
+    details: { days: body.days, new_trial_ends_at: newEnd.toISOString(), reason: body.reason ?? '' },
+    performed_by: admin.sub,
+  });
+
+  return jsonResponse({ success: true, trial_ends_at: newEnd.toISOString() });
+}
+
+// ============================================
+// USER + PUBLIC BILLING HANDLERS
+// ============================================
+
+async function handleGetMyBilling(env: Env, request: Request): Promise<Response> {
+  const user = await getAuthUser(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  // Auto-create billing account if needed
+  const { data: ensureResult, error: ensureError } = await supabaseRpc(env, 'ensure_billing_account', {
+    p_user_id: user.sub,
+    p_email: user.email ?? '',
+  });
+  if (ensureError) return errorResponse(`Database error: ${ensureError}`, 500);
+
+  // Fetch full billing summary
+  const { data, error } = await supabaseRpc(env, 'admin_get_billing_summary', { p_user_id: user.sub });
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+
+  return jsonResponse(data);
+}
+
+async function handleListPublicPlans(env: Env): Promise<Response> {
+  const { data, error } = await supabaseQuery(env, 'plans', {
+    filters: { is_public: true, is_archived: false },
+    select: 'plan_id,display_name,description,billing_model,base_price_cents,annual_price_cents,per_check_price,included_checks,trace_retention_days,feature_flags,limits,sort_order',
+    order: { column: 'sort_order', ascending: true },
+  });
+
+  if (error) return errorResponse(`Database error: ${error}`, 500);
+  return jsonResponse({ plans: data ?? [] });
+}
+
 // Main request handler
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -3028,6 +3345,16 @@ export default {
       if (agentTracesMatch && method === 'GET') {
         url.searchParams.set('agent_id', agentTracesMatch[1]);
         return handleGetTraces(env, url, request);
+      }
+
+      // GET /v1/plans (public)
+      if (path === '/v1/plans' && method === 'GET') {
+        return handleListPublicPlans(env);
+      }
+
+      // GET /v1/billing/me (authenticated)
+      if (path === '/v1/billing/me' && method === 'GET') {
+        return handleGetMyBilling(env, request);
       }
 
       // GET /v1/auth/me
@@ -3227,6 +3554,55 @@ export default {
 
       if (path === '/v1/admin/costs' && method === 'GET') {
         return handleAdminCosts(env, request, url);
+      }
+
+      // Admin Plan CRUD
+      if (path === '/v1/admin/plans' && method === 'GET') {
+        return handleAdminListPlans(env, request);
+      }
+      if (path === '/v1/admin/plans' && method === 'POST') {
+        return handleAdminCreatePlan(env, request);
+      }
+
+      const adminPlanMatch = path.match(/^\/v1\/admin\/plans\/([^/]+)$/);
+      if (adminPlanMatch && method === 'PUT') {
+        return handleAdminUpdatePlan(env, adminPlanMatch[1], request);
+      }
+
+      const adminPlanCloneMatch = path.match(/^\/v1\/admin\/plans\/([^/]+)\/clone$/);
+      if (adminPlanCloneMatch && method === 'POST') {
+        return handleAdminClonePlan(env, adminPlanCloneMatch[1], request);
+      }
+
+      const adminPlanArchiveMatch = path.match(/^\/v1\/admin\/plans\/([^/]+)\/archive$/);
+      if (adminPlanArchiveMatch && method === 'POST') {
+        return handleAdminArchivePlan(env, adminPlanArchiveMatch[1], request);
+      }
+
+      // Admin Billing Management
+      const adminUserBillingMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing$/);
+      if (adminUserBillingMatch && method === 'GET') {
+        return handleAdminGetUserBilling(env, adminUserBillingMatch[1], request);
+      }
+
+      const adminUserBillingPlanMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing\/plan$/);
+      if (adminUserBillingPlanMatch && method === 'PUT') {
+        return handleAdminOverridePlan(env, adminUserBillingPlanMatch[1], request);
+      }
+
+      const adminUserBillingLimitsMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing\/limits$/);
+      if (adminUserBillingLimitsMatch && method === 'PUT') {
+        return handleAdminOverrideLimits(env, adminUserBillingLimitsMatch[1], request);
+      }
+
+      const adminUserBillingCreditMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing\/credit$/);
+      if (adminUserBillingCreditMatch && method === 'POST') {
+        return handleAdminApplyCredit(env, adminUserBillingCreditMatch[1], request);
+      }
+
+      const adminUserBillingTrialMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing\/trial$/);
+      if (adminUserBillingTrialMatch && method === 'POST') {
+        return handleAdminExtendTrial(env, adminUserBillingTrialMatch[1], request);
       }
 
       // 404 for unmatched routes
