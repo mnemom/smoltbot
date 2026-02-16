@@ -3405,7 +3405,19 @@ async function handleGetMyBilling(env: Env, request: Request): Promise<Response>
   const { data, error } = await supabaseRpc(env, 'admin_get_billing_summary', { p_user_id: user.sub });
   if (error) return errorResponse(`Database error: ${error}`, 500);
 
-  return jsonResponse(data);
+  // Flatten: frontend expects account fields at top level
+  const summary = data as Record<string, unknown>;
+  const account = (summary?.account ?? {}) as Record<string, unknown>;
+  const plan = (summary?.plan ?? {}) as Record<string, unknown>;
+
+  return jsonResponse({
+    ...account,
+    plan_display_name: plan.display_name,
+    billing_model: plan.billing_model,
+    included_checks: plan.included_checks,
+    per_check_price: plan.per_check_price,
+    trace_retention_days: plan.trace_retention_days,
+  });
 }
 
 async function handleListPublicPlans(env: Env): Promise<Response> {
