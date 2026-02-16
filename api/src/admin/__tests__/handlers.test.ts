@@ -168,7 +168,7 @@ describe('handleAdminRevenueDashboard', () => {
     const response = await handleAdminRevenueDashboard(env, request, mockRequireAdmin);
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = ((await response.json()) as any) as any;
     expect(body.mrr_cents).toBe(50000);
     expect(body.active_accounts).toBe(10);
   });
@@ -217,7 +217,7 @@ describe('handleAdminCustomerDetail', () => {
     const response = await handleAdminCustomerDetail(env, request, mockRequireAdmin, 'user-1');
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.account.account_id).toBe('ba-test');
   });
 
@@ -286,7 +286,7 @@ describe('handleAdminSuspendAccount', () => {
     const response = await handleAdminSuspendAccount(env, request, mockRequireAdmin, 'user-1');
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.suspended).toBe(true);
 
     // Verify email was sent
@@ -325,7 +325,7 @@ describe('handleAdminUnsuspendAccount', () => {
     const response = await handleAdminUnsuspendAccount(env, request, mockRequireAdmin, 'user-1');
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.suspended).toBe(false);
   });
 
@@ -357,7 +357,7 @@ describe('handleAdminIssueCreditNote', () => {
     const response = await handleAdminIssueCreditNote(env, request, mockRequireAdmin, 'user-1');
 
     expect(response.status).toBe(201);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.id).toBe('cn_test');
   });
 
@@ -389,7 +389,7 @@ describe('handleAdminGenerateInvoice', () => {
     const response = await handleAdminGenerateInvoice(env, request, mockRequireAdmin, 'user-1');
 
     expect(response.status).toBe(201);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.id).toBe('inv_test');
   });
 
@@ -420,7 +420,7 @@ describe('handleAdminImpersonate', () => {
     const response = await handleAdminImpersonate(env, request, mockRequireAdmin, 'user-1');
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.impersonated_user_id).toBe('user-1');
     expect(body.snapshot).toBeDefined();
   });
@@ -450,7 +450,7 @@ describe('handleAdminConversionFunnel', () => {
     const response = await handleAdminConversionFunnel(env, request, mockRequireAdmin, url);
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.signups).toBe(50);
 
     // Verify days param was passed
@@ -551,7 +551,7 @@ describe('handleAdminListCoupons', () => {
     const response = await handleAdminListCoupons(env, request, mockRequireAdmin);
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.coupons).toHaveLength(1);
     expect(body.coupons[0].id).toBe('coupon_test');
   });
@@ -571,7 +571,7 @@ describe('handleAdminCreateCoupon', () => {
     const response = await handleAdminCreateCoupon(env, request, mockRequireAdmin);
 
     expect(response.status).toBe(201);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.id).toBe('coupon_new');
   });
 
@@ -599,7 +599,7 @@ describe('handleAdminDeactivateCoupon', () => {
     const response = await handleAdminDeactivateCoupon(env, request, mockRequireAdmin, 'coupon_test');
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.success).toBe(true);
     expect(body.coupon_id).toBe('coupon_test');
   });
@@ -619,7 +619,7 @@ describe('handleAdminApplyCoupon', () => {
     const response = await handleAdminApplyCoupon(env, request, mockRequireAdmin, 'user-1');
 
     expect(response.status).toBe(200);
-    const body = await response.json();
+    const body = (await response.json()) as any;
     expect(body.success).toBe(true);
     expect(body.coupon_id).toBe('coupon_test');
   });

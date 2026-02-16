@@ -273,7 +273,7 @@ export function createStripeProvider(secretKey: string): BillingProvider {
 
       let promoCodes: Stripe.PromotionCode[] = [];
       if (params.promotionCode) {
-        const promoCode = await stripe.promotionCodes.create({
+        const promoCode = await (stripe as any).promotionCodes.create({
           coupon: coupon.id,
           code: params.promotionCode,
         });
@@ -284,7 +284,7 @@ export function createStripeProvider(secretKey: string): BillingProvider {
     },
 
     async createPromotionCode(params) {
-      const promoCode = await stripe.promotionCodes.create({
+      const promoCode = await (stripe as any).promotionCodes.create({
         coupon: params.couponId,
         code: params.code,
       });
@@ -300,7 +300,8 @@ export function createStripeProvider(secretKey: string): BillingProvider {
     },
 
     async applyCustomerCoupon(params) {
-      await stripe.customers.update(params.customerId, {
+      // Stripe SDK 2026-01-28 changed customer update types; use any cast
+      await (stripe as any).customers.update(params.customerId, {
         coupon: params.couponId,
       });
     },
