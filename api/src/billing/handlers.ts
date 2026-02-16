@@ -268,24 +268,32 @@ export async function handleCheckout(
     }
   }
 
-  const session = await providerInstance.createCheckoutSession({
-    customerId,
-    priceId,
-    isMeteredPrice,
-    meteredPriceIds,
-    successUrl: 'https://mnemom.ai/settings/billing?checkout=success',
-    cancelUrl: 'https://mnemom.ai/settings/billing?checkout=canceled',
-    clientReferenceId: accountId,
-    metadata: {
-      mnemom_plan_id: planId,
-      mnemom_account_id: accountId,
-    },
-    trialPeriodDays: isDeveloper ? undefined : 14,
-    paymentMethodCollection: isDeveloper ? 'always' : 'if_required',
-    promotionCodeId,
-  });
+  try {
+    const session = await providerInstance.createCheckoutSession({
+      customerId,
+      priceId,
+      isMeteredPrice,
+      meteredPriceIds,
+      successUrl: 'https://mnemom.ai/settings/billing?checkout=success',
+      cancelUrl: 'https://mnemom.ai/settings/billing?checkout=canceled',
+      clientReferenceId: accountId,
+      metadata: {
+        mnemom_plan_id: planId,
+        mnemom_account_id: accountId,
+      },
+      trialPeriodDays: isDeveloper ? undefined : 14,
+      paymentMethodCollection: isDeveloper ? 'always' : 'if_required',
+      promotionCodeId,
+    });
 
-  return jsonResponse({ url: session.url, session_id: session.id });
+    return jsonResponse({ url: session.url, session_id: session.id });
+  } catch (err) {
+    console.error('[billing] Checkout session creation failed:', err);
+    return errorResponse(
+      `Checkout failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+      500,
+    );
+  }
 }
 
 // ============================================
@@ -486,21 +494,29 @@ export async function handleChangePlan(
   }
 
   // Get current subscription to find the item to update
-  const currentSub = await getProvider(env).getSubscription(subscriptionId);
-  if (currentSub.items.length === 0) {
-    return errorResponse('Current subscription has no items', 500);
+  try {
+    const currentSub = await getProvider(env).getSubscription(subscriptionId);
+    if (currentSub.items.length === 0) {
+      return errorResponse('Current subscription has no items', 500);
+    }
+
+    const subscription = await getProvider(env).updateSubscription(subscriptionId, {
+      items: [{ id: currentSub.items[0].id, priceId: newPriceId }],
+      prorationBehavior: 'create_prorations',
+    });
+
+    return jsonResponse({
+      updated: true,
+      plan_id: newPlanId,
+      status: subscription.status,
+    });
+  } catch (err) {
+    console.error('[billing] Plan change failed:', err);
+    return errorResponse(
+      `Plan change failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+      500,
+    );
   }
-
-  const subscription = await getProvider(env).updateSubscription(subscriptionId, {
-    items: [{ id: currentSub.items[0].id, priceId: newPriceId }],
-    prorationBehavior: 'create_prorations',
-  });
-
-  return jsonResponse({
-    updated: true,
-    plan_id: newPlanId,
-    status: subscription.status,
-  });
 }
 
 // ============================================
