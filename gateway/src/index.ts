@@ -101,7 +101,7 @@ export interface QuotaDecision {
   headers: Record<string, string>;
 }
 
-const FREE_TIER_CONTEXT: QuotaContext = {
+export const FREE_TIER_CONTEXT: QuotaContext = {
   plan_id: 'plan-free',
   billing_model: 'none',
   subscription_status: 'none',
@@ -124,7 +124,7 @@ const FREE_TIER_CONTEXT: QuotaContext = {
  * Resolve quota context for an agent. Checks KV cache first, falls back to
  * Supabase RPC. Fail-open: any error returns free-tier context.
  */
-async function resolveQuotaContext(
+export async function resolveQuotaContext(
   agentId: string,
   env: Env,
   mnemomKeyHash?: string,
@@ -298,7 +298,7 @@ export function evaluateQuota(context: QuotaContext): QuotaDecision {
 /**
  * Hash a Mnemom API key using SHA-256 (full hex, not truncated like agent hash).
  */
-async function hashMnemomApiKey(key: string): Promise<string> {
+export async function hashMnemomApiKey(key: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(key);
   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
@@ -736,7 +736,7 @@ async function storeCheckpoint(
 /**
  * Submit a metering event for billing. Non-blocking, fail-open.
  */
-async function submitMeteringEvent(
+export async function submitMeteringEvent(
   agentId: string,
   checkpointId: string,
   source: string,

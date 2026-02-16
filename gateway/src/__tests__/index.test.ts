@@ -7,6 +7,10 @@ import {
   handleHealthCheck,
   handleAnthropicProxy,
   evaluateQuota,
+  hashMnemomApiKey,
+  resolveQuotaContext,
+  submitMeteringEvent,
+  FREE_TIER_CONTEXT,
   type Env,
   type QuotaContext,
 } from '../index';
@@ -925,5 +929,685 @@ describe('evaluateQuota', () => {
     }));
     expect(decision.action).toBe('allow');
     expect(decision.headers['X-Mnemom-Usage-Percent']).toBe('50');
+  });
+});
+
+// ============================================================================
+// hashMnemomApiKey — full SHA-256 hex tests
+// ============================================================================
+
+describe('hashMnemomApiKey', () => {
+  it('should return a 64 character hex string (full SHA-256)', async () => {
+    const result = await hashMnemomApiKey('mk-test-key-12345');
+
+    expect(result).toHaveLength(64);
+    expect(result).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('should produce consistent output for the same input', async () => {
+    const result1 = await hashMnemomApiKey('mk-same-key');
+    const result2 = await hashMnemomApiKey('mk-same-key');
+
+    expect(result1).toBe(result2);
+  });
+
+  it('should produce different output for different inputs', async () => {
+    const result1 = await hashMnemomApiKey('mk-key-alpha');
+    const result2 = await hashMnemomApiKey('mk-key-beta');
+
+    expect(result1).not.toBe(result2);
+  });
+
+  it('should handle empty string input', async () => {
+    const result = await hashMnemomApiKey('');
+
+    expect(result).toHaveLength(64);
+    expect(result).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('should differ from truncated hashApiKey for the same input', async () => {
+    const input = 'shared-key-value';
+    const mnemomHash = await hashMnemomApiKey(input);
+    const agentHash = await hashApiKey(input);
+
+    // hashApiKey returns first 16 chars; hashMnemomApiKey returns all 64
+    expect(mnemomHash).toHaveLength(64);
+    expect(agentHash).toHaveLength(16);
+    // The first 16 chars should match since both use SHA-256
+    expect(mnemomHash.substring(0, 16)).toBe(agentHash);
+  });
+
+  it('should handle special characters', async () => {
+    const result = await hashMnemomApiKey('mk-!@#$%^&*()_+-=[]{}|;:,.<>?');
+
+    expect(result).toHaveLength(64);
+    expect(result).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ============================================================================
+// resolveQuotaContext — KV cache and Supabase RPC tests
+// ============================================================================
+
+describe('resolveQuotaContext', () => {
+  const agentId = 'smolt-abcd1234';
+
+  function createBillingEnv(overrides?: Partial<Env>): Env {
+    return createTestEnv({
+      BILLING_CACHE: {
+        get: vi.fn(),
+        put: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn(),
+        list: vi.fn(),
+        getWithMetadata: vi.fn(),
+      } as unknown as KVNamespace,
+      ...overrides,
+    });
+  }
+
+  it('should return cached data on cache hit', async () => {
+    const cachedContext: QuotaContext = {
+      plan_id: 'plan-developer',
+      billing_model: 'metered',
+      subscription_status: 'active',
+      included_checks: 0,
+      check_count_this_period: 42,
+      overage_threshold: null,
+      per_check_price: 1.0,
+      feature_flags: { managed_gateway: true },
+      limits: {},
+      account_id: 'ba-cached',
+      current_period_end: '2026-03-15T00:00:00Z',
+      past_due_since: null,
+    };
+
+    const env = createBillingEnv();
+    (env.BILLING_CACHE!.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(cachedContext);
+
+    const result = await resolveQuotaContext(agentId, env);
+
+    expect(result).toEqual(cachedContext);
+    // Should not have called fetch (no RPC needed)
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('should use agent-based cache key when no mnemomKeyHash provided', async () => {
+    const env = createBillingEnv();
+    (env.BILLING_CACHE!.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    // Mock the RPC call
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+      }),
+    });
+
+    await resolveQuotaContext(agentId, env);
+
+    expect(env.BILLING_CACHE!.get).toHaveBeenCalledWith(
+      `quota:agent:${agentId}`,
+      'json'
+    );
+  });
+
+  it('should use mnemom key hash cache key when mnemomKeyHash provided', async () => {
+    const env = createBillingEnv();
+    const mnemomKeyHash = 'abc123def456';
+    (env.BILLING_CACHE!.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    // Mock the RPC call
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ ...FREE_TIER_CONTEXT }),
+    });
+
+    await resolveQuotaContext(agentId, env, mnemomKeyHash);
+
+    expect(env.BILLING_CACHE!.get).toHaveBeenCalledWith(
+      `quota:mk:${mnemomKeyHash}`,
+      'json'
+    );
+  });
+
+  it('should call RPC and cache result on cache miss', async () => {
+    const rpcContext: QuotaContext = {
+      plan_id: 'plan-team',
+      billing_model: 'subscription_plus_metered',
+      subscription_status: 'active',
+      included_checks: 15000,
+      check_count_this_period: 500,
+      overage_threshold: null,
+      per_check_price: 0.5,
+      feature_flags: { managed_gateway: true },
+      limits: {},
+      account_id: 'ba-team-123',
+      current_period_end: '2026-03-15T00:00:00Z',
+      past_due_since: null,
+    };
+
+    const env = createBillingEnv();
+    (env.BILLING_CACHE!.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(rpcContext),
+    });
+
+    const result = await resolveQuotaContext(agentId, env);
+
+    expect(result).toEqual(rpcContext);
+    // Verify RPC was called with correct URL and body
+    expect(mockFetch).toHaveBeenCalledWith(
+      expect.stringContaining('/rest/v1/rpc/get_quota_context_for_agent'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ p_agent_id: agentId }),
+      })
+    );
+    // Verify result was written to KV cache with 5-min TTL
+    expect(env.BILLING_CACHE!.put).toHaveBeenCalledWith(
+      `quota:agent:${agentId}`,
+      JSON.stringify(rpcContext),
+      { expirationTtl: 300 }
+    );
+  });
+
+  it('should fall back to FREE_TIER_CONTEXT when RPC fails', async () => {
+    const env = createBillingEnv();
+    (env.BILLING_CACHE!.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+    });
+
+    const result = await resolveQuotaContext(agentId, env);
+
+    expect(result).toEqual(FREE_TIER_CONTEXT);
+    expect(result.plan_id).toBe('plan-free');
+    expect(result.billing_model).toBe('none');
+  });
+
+  it('should fall back to FREE_TIER_CONTEXT when fetch throws', async () => {
+    const env = createBillingEnv();
+    (env.BILLING_CACHE!.get as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+
+    mockFetch.mockRejectedValueOnce(new Error('Network error'));
+
+    const result = await resolveQuotaContext(agentId, env);
+
+    expect(result).toEqual(FREE_TIER_CONTEXT);
+  });
+
+  it('should continue to RPC when KV cache read throws', async () => {
+    const rpcContext: QuotaContext = {
+      ...FREE_TIER_CONTEXT,
+      plan_id: 'plan-developer',
+      billing_model: 'metered',
+      account_id: 'ba-dev',
+    };
+
+    const env = createBillingEnv();
+    (env.BILLING_CACHE!.get as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('KV error'));
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(rpcContext),
+    });
+
+    const result = await resolveQuotaContext(agentId, env);
+
+    expect(result).toEqual(rpcContext);
+  });
+
+  it('should work without BILLING_CACHE bound (no KV)', async () => {
+    const env = createTestEnv(); // No BILLING_CACHE
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ ...FREE_TIER_CONTEXT }),
+    });
+
+    const result = await resolveQuotaContext(agentId, env);
+
+    expect(result).toEqual(FREE_TIER_CONTEXT);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================================
+// submitMeteringEvent — Supabase RPC tests
+// ============================================================================
+
+describe('submitMeteringEvent', () => {
+  const agentId = 'smolt-abcd1234';
+  const checkpointId = 'chk-test-12345678';
+  const source = 'gateway';
+  const env = createTestEnv();
+
+  it('should resolve billing account and insert metering event', async () => {
+    // Mock get_billing_account_for_agent RPC
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ account_id: 'ba-acct-123' }),
+    });
+
+    // Mock metering event insert
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+    });
+
+    await submitMeteringEvent(agentId, checkpointId, source, env);
+
+    // Verify the RPC call
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[0][0]).toContain('/rest/v1/rpc/get_billing_account_for_agent');
+    const rpcBody = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(rpcBody).toEqual({ p_agent_id: agentId });
+
+    // Verify the metering event insert
+    expect(mockFetch.mock.calls[1][0]).toContain('/rest/v1/metering_events');
+    const insertBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+    expect(insertBody.account_id).toBe('ba-acct-123');
+    expect(insertBody.agent_id).toBe(agentId);
+    expect(insertBody.event_type).toBe('integrity_check');
+    expect(insertBody.metadata).toEqual({ checkpoint_id: checkpointId, source });
+    expect(insertBody.event_id).toMatch(/^me-[a-z0-9]{8}$/);
+  });
+
+  it('should succeed silently when account lookup fails (fail-open)', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+    });
+
+    // Should not throw
+    await expect(submitMeteringEvent(agentId, checkpointId, source, env))
+      .resolves.toBeUndefined();
+
+    // Should only have called the RPC, not the insert
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('should succeed silently when account_id is null', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ account_id: null }),
+    });
+
+    await expect(submitMeteringEvent(agentId, checkpointId, source, env))
+      .resolves.toBeUndefined();
+
+    // Only the RPC was called, no insert
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('should succeed silently when fetch throws (fail-open)', async () => {
+    mockFetch.mockRejectedValueOnce(new Error('Network failure'));
+
+    await expect(submitMeteringEvent(agentId, checkpointId, source, env))
+      .resolves.toBeUndefined();
+  });
+
+  it('should succeed silently when insert fails', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ account_id: 'ba-acct-123' }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+    });
+
+    await expect(submitMeteringEvent(agentId, checkpointId, source, env))
+      .resolves.toBeUndefined();
+  });
+
+  it('should include correct Supabase headers in RPC call', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ account_id: null }),
+    });
+
+    await submitMeteringEvent(agentId, checkpointId, source, env);
+
+    const headers = mockFetch.mock.calls[0][1].headers;
+    expect(headers.apikey).toBe(env.SUPABASE_KEY);
+    expect(headers.Authorization).toBe(`Bearer ${env.SUPABASE_KEY}`);
+    expect(headers['Content-Type']).toBe('application/json');
+  });
+});
+
+// ============================================================================
+// Billing enforcement integration — main handler with billing enabled
+// ============================================================================
+
+describe('Billing enforcement integration', () => {
+  let handler: { fetch: (request: Request, env: Env, ctx: ExecutionContext) => Promise<Response> };
+
+  beforeEach(async () => {
+    vi.resetModules();
+    mockFetch.mockReset();
+    handler = (await import('../index')).default;
+  });
+
+  function createBillingEnabledEnv(overrides?: Partial<Env>): Env {
+    return createTestEnv({
+      BILLING_ENFORCEMENT_ENABLED: 'true',
+      AIP_ENABLED: 'false', // Disable AIP to isolate billing tests
+      BILLING_CACHE: {
+        get: vi.fn().mockResolvedValue(null),
+        put: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn(),
+        list: vi.fn(),
+        getWithMetadata: vi.fn(),
+      } as unknown as KVNamespace,
+      ...overrides,
+    });
+  }
+
+  // Helper to mock the standard agent-lookup + forward flow
+  function mockAgentLookupAndForward() {
+    const existingAgent = {
+      id: 'agent-uuid-billing',
+      agent_hash: 'abcdef0123456789',
+      name: null,
+      created_at: '2024-01-01T00:00:00Z',
+      last_seen: '2024-01-15T10:00:00Z',
+    };
+
+    // Agent lookup
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([existingAgent]),
+    });
+
+    return existingAgent;
+  }
+
+  it('should proceed without billing when x-mnemom-api-key is absent and billing enabled', async () => {
+    const env = createBillingEnabledEnv();
+
+    mockAgentLookupAndForward();
+
+    // resolveQuotaContext RPC (no mnemom key, uses agent hash cache key)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        ...FREE_TIER_CONTEXT,
+        plan_id: 'plan-free',
+        billing_model: 'none',
+      }),
+    });
+
+    // Forward request to CF AI Gateway (AIP disabled so only this forward)
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: 'msg_123' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const request = new Request('https://gateway.smoltbot.com/anthropic/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': 'sk-ant-test-key' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const ctx = createMockContext();
+
+    const response = await handler.fetch(request, env, ctx);
+
+    // Should succeed — free tier is always allowed
+    expect(response.status).toBe(200);
+  });
+
+  it('should check quota when x-mnemom-api-key is provided', async () => {
+    const env = createBillingEnabledEnv();
+
+    mockAgentLookupAndForward();
+
+    // Mnemom API key validation RPC
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ valid: true, account_id: 'ba-acct-valid' }),
+    });
+
+    // resolveQuotaContext RPC
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-developer',
+        billing_model: 'metered',
+        subscription_status: 'active',
+        included_checks: 0,
+        check_count_this_period: 50,
+        overage_threshold: null,
+        per_check_price: 1.0,
+        feature_flags: { managed_gateway: true },
+        limits: {},
+        account_id: 'ba-acct-valid',
+        current_period_end: '2026-03-15T00:00:00Z',
+        past_due_since: null,
+      }),
+    });
+
+    // Forward request to CF AI Gateway
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: 'msg_456' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const request = new Request('https://gateway.smoltbot.com/anthropic/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': 'sk-ant-test-key',
+        'x-mnemom-api-key': 'mk-live-test-key-12345',
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'hello' }] }),
+    });
+    const ctx = createMockContext();
+
+    const response = await handler.fetch(request, env, ctx);
+
+    // Developer metered with active subscription should be allowed
+    expect(response.status).toBe(200);
+  });
+
+  it('should return 402 when quota is rejected', async () => {
+    const env = createBillingEnabledEnv();
+
+    mockAgentLookupAndForward();
+
+    // Mnemom API key validation RPC
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ valid: true, account_id: 'ba-acct-overdue' }),
+    });
+
+    // resolveQuotaContext RPC — return a past_due context that triggers rejection
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-developer',
+        billing_model: 'metered',
+        subscription_status: 'past_due',
+        included_checks: 0,
+        check_count_this_period: 200,
+        overage_threshold: null,
+        per_check_price: 1.0,
+        feature_flags: {},
+        limits: {},
+        account_id: 'ba-acct-overdue',
+        current_period_end: '2026-02-01T00:00:00Z',
+        past_due_since: tenDaysAgo,
+      }),
+    });
+
+    const request = new Request('https://gateway.smoltbot.com/anthropic/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': 'sk-ant-test-key',
+        'x-mnemom-api-key': 'mk-live-overdue-key',
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'test' }] }),
+    });
+    const ctx = createMockContext();
+
+    const response = await handler.fetch(request, env, ctx);
+
+    expect(response.status).toBe(402);
+    const body = await response.json();
+    expect(body.type).toBe('billing_error');
+    expect(body.reason).toBe('subscription_past_due_grace_expired');
+  });
+
+  it('should return 401 when Mnemom API key is invalid', async () => {
+    const env = createBillingEnabledEnv();
+
+    mockAgentLookupAndForward();
+
+    // Mnemom API key validation RPC — key is invalid
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ valid: false }),
+    });
+
+    const request = new Request('https://gateway.smoltbot.com/anthropic/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': 'sk-ant-test-key',
+        'x-mnemom-api-key': 'mk-invalid-key',
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'test' }] }),
+    });
+    const ctx = createMockContext();
+
+    const response = await handler.fetch(request, env, ctx);
+
+    expect(response.status).toBe(401);
+    const body = await response.json();
+    expect(body.type).toBe('authentication_error');
+    expect(body.error).toBe('Invalid Mnemom API key');
+  });
+
+  it('should not enforce billing when BILLING_ENFORCEMENT_ENABLED is false', async () => {
+    const env = createTestEnv({
+      BILLING_ENFORCEMENT_ENABLED: 'false',
+      AIP_ENABLED: 'false',
+    });
+
+    const existingAgent = {
+      id: 'agent-uuid-nobilling',
+      agent_hash: 'abcdef0123456789',
+    };
+
+    // Agent lookup
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([existingAgent]),
+    });
+
+    // Forward request (no quota calls should happen)
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: 'msg_789' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const request = new Request('https://gateway.smoltbot.com/anthropic/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': 'sk-ant-test-key',
+        'x-mnemom-api-key': 'mk-should-be-ignored',
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const ctx = createMockContext();
+
+    const response = await handler.fetch(request, env, ctx);
+
+    // Should succeed without any billing checks
+    expect(response.status).toBe(200);
+    // Only 2 fetch calls: agent lookup + forward (no billing RPC)
+    // (waitUntil calls are background and don't count for synchronous assertions)
+    expect(mockFetch.mock.calls.filter(
+      (call: any[]) => call[0]?.toString().includes('resolve_mnemom_api_key')
+    )).toHaveLength(0);
+    expect(mockFetch.mock.calls.filter(
+      (call: any[]) => call[0]?.toString().includes('get_quota_context_for_agent')
+    )).toHaveLength(0);
+  });
+
+  it('should include usage warning headers when quota is approaching', async () => {
+    const env = createBillingEnabledEnv();
+
+    mockAgentLookupAndForward();
+
+    // Mnemom API key validation
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ valid: true, account_id: 'ba-acct-warn' }),
+    });
+
+    // resolveQuotaContext — team plan at 85% usage
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-team',
+        billing_model: 'subscription_plus_metered',
+        subscription_status: 'active',
+        included_checks: 15000,
+        check_count_this_period: 12750,
+        overage_threshold: null,
+        per_check_price: 0.5,
+        feature_flags: { managed_gateway: true },
+        limits: {},
+        account_id: 'ba-acct-warn',
+        current_period_end: '2026-03-15T00:00:00Z',
+        past_due_since: null,
+      }),
+    });
+
+    // Forward request
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: 'msg_warn' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const request = new Request('https://gateway.smoltbot.com/anthropic/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': 'sk-ant-test-key',
+        'x-mnemom-api-key': 'mk-live-warn-key',
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', messages: [{ role: 'user', content: 'test' }] }),
+    });
+    const ctx = createMockContext();
+
+    const response = await handler.fetch(request, env, ctx);
+
+    // Should still allow but with warning headers
+    expect(response.status).toBe(200);
+    expect(response.headers.get('X-Mnemom-Usage-Warning')).toBe('approaching_quota');
+    expect(response.headers.get('X-Mnemom-Usage-Percent')).toBe('85');
   });
 });
