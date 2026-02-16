@@ -841,3 +841,102 @@ export async function handleValidatePromo(
     return errorResponse('Failed to validate promo code', 500);
   }
 }
+
+// ============================================
+// Enterprise Contact Form
+// ============================================
+
+export async function handleEnterpriseContact(
+  env: BillingEnv,
+  request: Request
+): Promise<Response> {
+  const body = await request.json() as Record<string, unknown>;
+  const name = (body.name as string || '').trim();
+  const email = (body.email as string || '').trim();
+  const company = (body.company as string || '').trim();
+  const role = (body.role as string || '').trim();
+  const companySize = (body.company_size as string || '').trim();
+  const message = (body.message as string || '').trim();
+
+  if (!name || !email || !company) {
+    return errorResponse('name, email, and company are required', 400);
+  }
+
+  // Basic email validation
+  if (!email.includes('@') || !email.includes('.')) {
+    return errorResponse('Invalid email address', 400);
+  }
+
+  const leadId = `el-${crypto.randomUUID().slice(0, 8)}`;
+
+  try {
+    // Insert into enterprise_leads table
+    const insertRes = await fetch(`${env.SUPABASE_URL}/rest/v1/enterprise_leads`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        id: leadId,
+        name,
+        email,
+        company,
+        role: role || null,
+        company_size: companySize || null,
+        message: message || null,
+        source: 'pricing_page',
+      }),
+    });
+
+    if (!insertRes.ok) {
+      const errText = await insertRes.text();
+      console.error('[enterprise] Insert failed:', errText);
+      return errorResponse('Failed to submit inquiry', 500);
+    }
+
+    // Send notification email to sales team (best-effort)
+    try {
+      const { sendEmail } = await import('./email');
+      await sendEmail('support@mnemom.ai', {
+        subject: `Enterprise Lead: ${company} — ${name}`,
+        html: `<div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px;">
+<h2 style="color: #D97706;">New Enterprise Inquiry</h2>
+<table style="border-collapse: collapse; width: 100%;">
+<tr><td style="padding: 8px 12px; font-weight: bold; color: #666;">Name</td><td style="padding: 8px 12px;">${name}</td></tr>
+<tr><td style="padding: 8px 12px; font-weight: bold; color: #666;">Email</td><td style="padding: 8px 12px;"><a href="mailto:${email}">${email}</a></td></tr>
+<tr><td style="padding: 8px 12px; font-weight: bold; color: #666;">Company</td><td style="padding: 8px 12px;">${company}</td></tr>
+${role ? `<tr><td style="padding: 8px 12px; font-weight: bold; color: #666;">Role</td><td style="padding: 8px 12px;">${role}</td></tr>` : ''}
+${companySize ? `<tr><td style="padding: 8px 12px; font-weight: bold; color: #666;">Team Size</td><td style="padding: 8px 12px;">${companySize}</td></tr>` : ''}
+</table>
+${message ? `<h3 style="margin-top: 16px;">Use Case</h3><p style="color: #333; white-space: pre-wrap;">${message}</p>` : ''}
+<hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
+<p style="color: #999; font-size: 12px;">Lead ID: ${leadId} | Source: Pricing Page</p>
+</div>`,
+        text: `New Enterprise Inquiry\n\nName: ${name}\nEmail: ${email}\nCompany: ${company}\n${role ? `Role: ${role}\n` : ''}${companySize ? `Team Size: ${companySize}\n` : ''}${message ? `\nUse Case:\n${message}` : ''}\n\nLead ID: ${leadId}`,
+      }, env);
+
+      // Send confirmation to the lead
+      await sendEmail(email, {
+        subject: 'Thanks for your interest in Mnemom Enterprise',
+        html: `<div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px;">
+<h2 style="color: #D97706;">Thanks for reaching out, ${name.split(' ')[0]}!</h2>
+<p>We received your enterprise inquiry and a member of our team will be in touch within one business day.</p>
+<p>In the meantime, you can explore our <a href="https://mnemom.ai/research">documentation</a> or reach us directly at <a href="mailto:support@mnemom.ai">support@mnemom.ai</a>.</p>
+<p style="margin-top: 24px;">— The Mnemom Team</p>
+</div>`,
+        text: `Thanks for reaching out, ${name.split(' ')[0]}!\n\nWe received your enterprise inquiry and a member of our team will be in touch within one business day.\n\nIn the meantime, you can explore our documentation at https://mnemom.ai/research or reach us directly at support@mnemom.ai.\n\n— The Mnemom Team`,
+      }, env);
+    } catch (emailErr) {
+      console.error('[enterprise] Email notification failed:', emailErr);
+      // Don't fail the request — the lead was saved
+    }
+
+    return jsonResponse({ id: leadId });
+  } catch (err) {
+    console.error('[enterprise] Contact form error:', err);
+    return errorResponse('Failed to submit inquiry', 500);
+  }
+}

@@ -393,6 +393,16 @@ async function handleSubscriptionUpdated(
       }
     }
   }
+
+  // Notify org billing_email about subscription update
+  const acctEmail = (account as Record<string, unknown>).billing_email as string;
+  if (acctEmail) {
+    await sendToOrgBillingEmail(env, accountId, acctEmail, {
+      subject: 'Mnemom subscription update',
+      html: `<div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;"><h1 style="color: #1a1a2e; font-size: 24px;">Subscription updated</h1><p style="color: #444; line-height: 1.6;">Your organization's Mnemom subscription has been updated. Check your <a href="https://mnemom.ai/settings/billing" style="color: #4f46e5;">billing dashboard</a> for details.</p><p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom — Transparent AI Infrastructure</p></div>`,
+      text: 'Your organization\'s Mnemom subscription has been updated. Check your billing dashboard for details: https://mnemom.ai/settings/billing',
+    });
+  }
 }
 
 async function handleSubscriptionDeleted(
@@ -503,6 +513,11 @@ async function handleInvoicePaid(
       amountCents: amountPaid,
       invoiceUrl: hostedInvoiceUrl,
     }), env);
+    await sendToOrgBillingEmail(env, accountId, email, invoicePaidEmail({
+      email,
+      amountCents: amountPaid,
+      invoiceUrl: hostedInvoiceUrl,
+    }));
   }
 }
 
@@ -537,6 +552,7 @@ async function handleInvoicePaymentFailed(
   const email = acct.billing_email as string;
   if (email) {
     await sendEmail(email, paymentFailedEmail({ email }, attemptCount), env);
+    await sendToOrgBillingEmail(env, accountId, email, paymentFailedEmail({ email }, attemptCount));
   }
 }
 
@@ -628,6 +644,53 @@ async function purgeQuotaCache(env: BillingEnv, accountId: string): Promise<void
     }
   } catch (err) {
     console.warn(`[webhook] Cache purge failed for account ${accountId}:`, err);
+  }
+}
+
+/**
+ * If the billing account belongs to an org, send a notification
+ * to the org's billing_email (if set and different from account email).
+ */
+async function sendToOrgBillingEmail(
+  env: BillingEnv,
+  accountId: string,
+  accountEmail: string,
+  template: { subject: string; html: string; text: string },
+): Promise<void> {
+  try {
+    // Check if account has org_id
+    const accountUrl = new URL(`${env.SUPABASE_URL}/rest/v1/billing_accounts`);
+    accountUrl.searchParams.set('account_id', `eq.${accountId}`);
+    accountUrl.searchParams.set('select', 'org_id');
+    const accountRes = await fetch(accountUrl.toString(), {
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+      },
+    });
+    if (!accountRes.ok) return;
+    const accounts = (await accountRes.json()) as Array<{ org_id?: string }>;
+    const orgId = accounts[0]?.org_id;
+    if (!orgId) return;
+
+    // Fetch org billing_email
+    const orgUrl = new URL(`${env.SUPABASE_URL}/rest/v1/orgs`);
+    orgUrl.searchParams.set('org_id', `eq.${orgId}`);
+    orgUrl.searchParams.set('select', 'billing_email');
+    const orgRes = await fetch(orgUrl.toString(), {
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+      },
+    });
+    if (!orgRes.ok) return;
+    const orgs = (await orgRes.json()) as Array<{ billing_email?: string }>;
+    const orgBillingEmail = orgs[0]?.billing_email;
+    if (orgBillingEmail && orgBillingEmail !== accountEmail) {
+      await sendEmail(orgBillingEmail, template, env);
+    }
+  } catch (err) {
+    console.warn(`[webhook] Org billing email send failed for account ${accountId}:`, err);
   }
 }
 

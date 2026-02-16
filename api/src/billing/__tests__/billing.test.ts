@@ -942,6 +942,8 @@ describe('webhook-handler', () => {
       mockFetch.mockResolvedValueOnce(jsonOk({ id: 'r-1' }));
       // Log email
       mockFetch.mockResolvedValueOnce(jsonOk({}));
+      // sendToOrgBillingEmail: lookup billing_accounts for org_id (no org)
+      mockFetch.mockResolvedValueOnce(jsonOk([{ org_id: null }]));
       // Mark processed
       mockFetch.mockResolvedValueOnce(jsonOk([]));
 

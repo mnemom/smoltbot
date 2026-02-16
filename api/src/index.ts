@@ -58,10 +58,30 @@ import {
   handleSetBudgetAlert,
   handleExportUsage,
   handleValidatePromo,
+  handleEnterpriseContact,
 } from './billing/handlers';
 import { handleGetFeatures, requireFeature } from './billing/feature-gate';
 import { handleCreateApiKey, handleListApiKeys, handleRevokeApiKey } from './billing/api-keys';
 import type { BillingEnv } from './billing/types';
+import {
+  handleCreateOrg,
+  handleListMyOrgs,
+  handleGetOrg,
+  handleUpdateOrg,
+  handleDeleteOrg,
+  handleListMembers,
+  handleInviteMember,
+  handleListInvitations,
+  handleRevokeInvitation,
+  handleAcceptInvitation,
+  handleUpdateMemberRole,
+  handleRemoveMember,
+  handleGetOrgAgents,
+  handleCreateOrgApiKey,
+  handleListOrgApiKeys,
+  handleRevokeOrgApiKey,
+} from './org/handlers';
+import { getOrgMembership } from './org/rbac';
 
 export interface Env {
   SUPABASE_URL: string;
@@ -3410,6 +3430,21 @@ async function handleGetMyBilling(env: Env, request: Request): Promise<Response>
   const account = (summary?.account ?? {}) as Record<string, unknown>;
   const plan = (summary?.plan ?? {}) as Record<string, unknown>;
 
+  // Check org membership
+  let orgContext: Record<string, unknown> | null = null;
+  try {
+    const membership = await getOrgMembership(env as unknown as BillingEnv, user.sub);
+    if (membership) {
+      orgContext = {
+        org_id: membership.org.org_id,
+        org_name: membership.org.name,
+        org_role: membership.member.role,
+      };
+    }
+  } catch {
+    // Best-effort — don't fail the billing response for org lookup errors
+  }
+
   return jsonResponse({
     ...account,
     plan_display_name: plan.display_name,
@@ -3417,6 +3452,9 @@ async function handleGetMyBilling(env: Env, request: Request): Promise<Response>
     included_checks: plan.included_checks,
     per_check_price: plan.per_check_price,
     trace_retention_days: plan.trace_retention_days,
+    org_id: orgContext?.org_id ?? null,
+    org_name: orgContext?.org_name ?? null,
+    org_role: orgContext?.org_role ?? null,
   });
 }
 
@@ -3595,6 +3633,105 @@ export default {
       // POST /v1/billing/validate-promo
       if (path === '/v1/billing/validate-promo' && method === 'POST') {
         return handleValidatePromo(env as unknown as BillingEnv, request);
+      }
+
+      // POST /v1/enterprise/contact (public, no auth required)
+      if (path === '/v1/enterprise/contact' && method === 'POST') {
+        return handleEnterpriseContact(env as unknown as BillingEnv, request);
+      }
+
+      // ============================================
+      // ORGANIZATION ROUTES
+      // ============================================
+
+      // POST /v1/orgs/invitations/accept (must be before :org_id routes)
+      if (path === '/v1/orgs/invitations/accept' && method === 'POST') {
+        return handleAcceptInvitation(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // POST /v1/orgs
+      if (path === '/v1/orgs' && method === 'POST') {
+        return handleCreateOrg(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // GET /v1/orgs
+      if (path === '/v1/orgs' && method === 'GET') {
+        return handleListMyOrgs(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // Routes with :org_id parameter
+      const orgMatch = path.match(/^\/v1\/orgs\/([^/]+)$/);
+
+      // GET /v1/orgs/:org_id
+      if (orgMatch && method === 'GET') {
+        return handleGetOrg(env as unknown as BillingEnv, request, getAuthUser as any, orgMatch[1]);
+      }
+
+      // PATCH /v1/orgs/:org_id
+      if (orgMatch && method === 'PATCH') {
+        return handleUpdateOrg(env as unknown as BillingEnv, request, getAuthUser as any, orgMatch[1]);
+      }
+
+      // DELETE /v1/orgs/:org_id
+      if (orgMatch && method === 'DELETE') {
+        return handleDeleteOrg(env as unknown as BillingEnv, request, getAuthUser as any, orgMatch[1]);
+      }
+
+      // GET /v1/orgs/:org_id/members
+      const orgMembersMatch = path.match(/^\/v1\/orgs\/([^/]+)\/members$/);
+      if (orgMembersMatch && method === 'GET') {
+        return handleListMembers(env as unknown as BillingEnv, request, getAuthUser as any, orgMembersMatch[1]);
+      }
+
+      // PATCH /v1/orgs/:org_id/members/:user_id
+      const orgMemberMatch = path.match(/^\/v1\/orgs\/([^/]+)\/members\/([^/]+)$/);
+      if (orgMemberMatch && method === 'PATCH') {
+        return handleUpdateMemberRole(env as unknown as BillingEnv, request, getAuthUser as any, orgMemberMatch[1], orgMemberMatch[2]);
+      }
+
+      // DELETE /v1/orgs/:org_id/members/:user_id
+      if (orgMemberMatch && method === 'DELETE') {
+        return handleRemoveMember(env as unknown as BillingEnv, request, getAuthUser as any, orgMemberMatch[1], orgMemberMatch[2]);
+      }
+
+      // POST /v1/orgs/:org_id/invitations
+      const orgInvitationsMatch = path.match(/^\/v1\/orgs\/([^/]+)\/invitations$/);
+      if (orgInvitationsMatch && method === 'POST') {
+        return handleInviteMember(env as unknown as BillingEnv, request, getAuthUser as any, orgInvitationsMatch[1]);
+      }
+
+      // GET /v1/orgs/:org_id/invitations
+      if (orgInvitationsMatch && method === 'GET') {
+        return handleListInvitations(env as unknown as BillingEnv, request, getAuthUser as any, orgInvitationsMatch[1]);
+      }
+
+      // DELETE /v1/orgs/:org_id/invitations/:id
+      const orgInvitationMatch = path.match(/^\/v1\/orgs\/([^/]+)\/invitations\/([^/]+)$/);
+      if (orgInvitationMatch && method === 'DELETE') {
+        return handleRevokeInvitation(env as unknown as BillingEnv, request, getAuthUser as any, orgInvitationMatch[1], orgInvitationMatch[2]);
+      }
+
+      // GET /v1/orgs/:org_id/agents
+      const orgAgentsMatch = path.match(/^\/v1\/orgs\/([^/]+)\/agents$/);
+      if (orgAgentsMatch && method === 'GET') {
+        return handleGetOrgAgents(env as unknown as BillingEnv, request, getAuthUser as any, orgAgentsMatch[1]);
+      }
+
+      // POST /v1/orgs/:org_id/api-keys
+      const orgApiKeysMatch = path.match(/^\/v1\/orgs\/([^/]+)\/api-keys$/);
+      if (orgApiKeysMatch && method === 'POST') {
+        return handleCreateOrgApiKey(env as unknown as BillingEnv, request, getAuthUser as any, orgApiKeysMatch[1]);
+      }
+
+      // GET /v1/orgs/:org_id/api-keys
+      if (orgApiKeysMatch && method === 'GET') {
+        return handleListOrgApiKeys(env as unknown as BillingEnv, request, getAuthUser as any, orgApiKeysMatch[1]);
+      }
+
+      // DELETE /v1/orgs/:org_id/api-keys/:key_id
+      const orgApiKeyMatch = path.match(/^\/v1\/orgs\/([^/]+)\/api-keys\/([^/]+)$/);
+      if (orgApiKeyMatch && method === 'DELETE') {
+        return handleRevokeOrgApiKey(env as unknown as BillingEnv, request, getAuthUser as any, orgApiKeyMatch[1], orgApiKeyMatch[2]);
       }
 
       // GET /v1/auth/me

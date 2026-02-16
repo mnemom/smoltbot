@@ -165,7 +165,9 @@ describe('processWebhookEvent', () => {
       mockFetch.mockResolvedValueOnce(mockResponse({ id: 'email_789' }));
       // 6. Log email
       mockFetch.mockResolvedValueOnce(mockResponse([], 201));
-      // 7. Update webhook event status
+      // 7. sendToOrgBillingEmail: lookup billing_accounts for org_id (no org)
+      mockFetch.mockResolvedValueOnce(mockResponse([{ org_id: null }]));
+      // 8. Update webhook event status
       mockFetch.mockResolvedValueOnce(mockResponse([]));
 
       await processWebhookEvent(event, mockEnv);
@@ -204,7 +206,9 @@ describe('processWebhookEvent', () => {
       mockFetch.mockResolvedValueOnce(mockResponse({ id: 'email_receipt' }));
       // 6. Log email
       mockFetch.mockResolvedValueOnce(mockResponse([], 201));
-      // 7. Update webhook event status
+      // 7. sendToOrgBillingEmail: lookup billing_accounts for org_id (no org)
+      mockFetch.mockResolvedValueOnce(mockResponse([{ org_id: null }]));
+      // 8. Update webhook event status
       mockFetch.mockResolvedValueOnce(mockResponse([]));
 
       await processWebhookEvent(event, mockEnv);

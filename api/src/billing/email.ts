@@ -443,3 +443,46 @@ ${data.checksUsed === 0 ? 'Need help getting started? Point your agent at the ga
 View your dashboard: https://mnemom.ai/settings/billing`,
   };
 }
+
+export function orgInviteEmail(data: { inviterName: string; orgName: string; acceptUrl: string }): EmailTemplate {
+  return {
+    subject: `${data.inviterName} invited you to join ${data.orgName} on Mnemom`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
+        <h1 style="color: #1a1a2e; font-size: 24px;">You've been invited to ${data.orgName}</h1>
+        <p style="color: #444; line-height: 1.6;"><strong>${data.inviterName}</strong> has invited you to join <strong>${data.orgName}</strong> on Mnemom.</p>
+        <p style="color: #444; line-height: 1.6;">Click the button below to accept the invitation and join the organization.</p>
+        <p style="margin: 24px 0;"><a href="${data.acceptUrl}" style="display: inline-block; background: #4f46e5; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 600;">Accept Invitation</a></p>
+        <p style="color: #444; line-height: 1.6;">This invitation will expire in 7 days. If you did not expect this invitation, you can safely ignore this email.</p>
+        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
+      </div>
+    `,
+    text: `You've been invited to ${data.orgName}
+
+${data.inviterName} has invited you to join ${data.orgName} on Mnemom.
+
+Accept the invitation by visiting the link below:
+${data.acceptUrl}
+
+This invitation will expire in 7 days. If you did not expect this invitation, you can safely ignore this email.`,
+  };
+}
+
+export function orgRoleChangeEmail(data: { orgName: string; oldRole: string; newRole: string }): EmailTemplate {
+  return {
+    subject: `Your role in ${data.orgName} has been updated`,
+    html: `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
+        <h1 style="color: #1a1a2e; font-size: 24px;">Role updated in ${data.orgName}</h1>
+        <p style="color: #444; line-height: 1.6;">Your role in <strong>${data.orgName}</strong> has been changed from <strong>${data.oldRole}</strong> to <strong>${data.newRole}</strong>.</p>
+        <p style="color: #444; line-height: 1.6;">This change is effective immediately. If you have any questions, please contact your organization administrator.</p>
+        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
+      </div>
+    `,
+    text: `Role updated in ${data.orgName}
+
+Your role in ${data.orgName} has been changed from ${data.oldRole} to ${data.newRole}.
+
+This change is effective immediately. If you have any questions, please contact your organization administrator.`,
+  };
+}
