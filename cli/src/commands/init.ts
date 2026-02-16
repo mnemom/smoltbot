@@ -212,7 +212,10 @@ async function standaloneFlow(
     process.exit(1);
   }
 
-  // Step 3: Create config
+  // Step 3: Prompt for optional Mnemom API key (billing identity)
+  const mnemomApiKey = await promptMnemomApiKey(existingConfig);
+
+  // Step 4: Create config
   const firstApiKey = verifiedProviders[0].apiKey;
   const agentId = firstApiKey
     ? deriveAgentId(firstApiKey)
@@ -225,14 +228,15 @@ async function standaloneFlow(
     gateway: GATEWAY_URL,
     openclawConfigured: false,
     providers: providerNames,
+    ...(mnemomApiKey ? { mnemomApiKey } : {}),
     configuredAt: new Date().toISOString(),
   };
 
   saveConfig(config);
   console.log("✓ Created ~/.smoltbot/config.json\n");
 
-  // Step 4: Show success + setup instructions
-  showStandaloneSuccess(agentId, verifiedProviders);
+  // Step 5: Show success + setup instructions
+  showStandaloneSuccess(agentId, verifiedProviders, mnemomApiKey);
 }
 
 /**
@@ -241,6 +245,7 @@ async function standaloneFlow(
 function showStandaloneSuccess(
   agentId: string,
   verifiedProviders: { provider: Provider; apiKey: string }[],
+  mnemomApiKey?: string,
 ): void {
   console.log("=".repeat(60));
   console.log("  smoltbot initialized successfully!");
@@ -252,10 +257,18 @@ function showStandaloneSuccess(
   for (const { provider } of verifiedProviders) {
     console.log(`  ✓ ${PROVIDER_LABELS[provider]}`);
   }
+  if (mnemomApiKey) {
+    console.log(`  ✓ Mnemom API key configured`);
+  }
   console.log();
 
   console.log("─".repeat(50));
   console.log("\nConfigure your agent to use the gateway:\n");
+
+  if (mnemomApiKey) {
+    console.log("  Set your Mnemom API key as an environment variable:\n");
+    console.log(`    export MNEMOM_API_KEY=${mnemomApiKey}\n`);
+  }
 
   for (const { provider } of verifiedProviders) {
     const label = PROVIDER_LABELS[provider];
@@ -264,21 +277,53 @@ function showStandaloneSuccess(
     console.log(`  ${label}:`);
 
     if (provider === "anthropic") {
-      console.log(`    Python:     client = Anthropic(base_url="${baseUrl}")`);
-      console.log(`    TypeScript: new Anthropic({ baseURL: "${baseUrl}" })`);
+      if (mnemomApiKey) {
+        console.log(`    Python:`);
+        console.log(`      client = Anthropic(`);
+        console.log(`          base_url="${baseUrl}",`);
+        console.log(`          default_headers={"x-mnemom-api-key": os.environ["MNEMOM_API_KEY"]}`);
+        console.log(`      )`);
+        console.log(`    TypeScript:`);
+        console.log(`      new Anthropic({`);
+        console.log(`          baseURL: "${baseUrl}",`);
+        console.log(`          defaultHeaders: { "x-mnemom-api-key": process.env.MNEMOM_API_KEY }`);
+        console.log(`      })`);
+      } else {
+        console.log(`    Python:     client = Anthropic(base_url="${baseUrl}")`);
+        console.log(`    TypeScript: new Anthropic({ baseURL: "${baseUrl}" })`);
+      }
       console.log(`    Env var:    export ANTHROPIC_BASE_URL=${baseUrl}`);
     } else if (provider === "openai") {
-      console.log(`    Python:     client = OpenAI(base_url="${baseUrl}")`);
-      console.log(`    TypeScript: new OpenAI({ baseURL: "${baseUrl}" })`);
+      if (mnemomApiKey) {
+        console.log(`    Python:`);
+        console.log(`      client = OpenAI(`);
+        console.log(`          base_url="${baseUrl}",`);
+        console.log(`          default_headers={"x-mnemom-api-key": os.environ["MNEMOM_API_KEY"]}`);
+        console.log(`      )`);
+        console.log(`    TypeScript:`);
+        console.log(`      new OpenAI({`);
+        console.log(`          baseURL: "${baseUrl}",`);
+        console.log(`          defaultHeaders: { "x-mnemom-api-key": process.env.MNEMOM_API_KEY }`);
+        console.log(`      })`);
+      } else {
+        console.log(`    Python:     client = OpenAI(base_url="${baseUrl}")`);
+        console.log(`    TypeScript: new OpenAI({ baseURL: "${baseUrl}" })`);
+      }
       console.log(`    Env var:    export OPENAI_BASE_URL=${baseUrl}`);
     } else if (provider === "gemini") {
       console.log(`    REST:       POST ${baseUrl}/v1beta/models/{model}:generateContent`);
+      if (mnemomApiKey) {
+        console.log(`    Header:     x-mnemom-api-key: $MNEMOM_API_KEY`);
+      }
       console.log(`    Env var:    export GEMINI_BASE_URL=${baseUrl}`);
     }
     console.log();
   }
 
-  console.log("Your API key is passed through to the provider via the gateway.");
+  console.log("Your provider API key is passed through to the provider via the gateway.");
+  if (mnemomApiKey) {
+    console.log("Your Mnemom API key identifies your billing account for quota tracking.");
+  }
   console.log("The gateway traces requests for transparency — no keys are stored.\n");
 
   console.log(`Your traces will appear at:\n`);
@@ -422,8 +467,9 @@ async function openclawFlowWithDetection(
       const reconfigure = await askYesNo("Reconfigure smoltbot providers?", true);
       if (!reconfigure) {
         console.log("\nKeeping existing configuration.\n");
+        const mnemomKey = await promptMnemomApiKey(existingConfig);
         const firstApiKey = verifiedProviders[0]?.apiKey;
-        const agentId = await createSmoltbotConfig(existingConfig, firstApiKey);
+        const agentId = await createSmoltbotConfig(existingConfig, firstApiKey, mnemomKey);
         showOpenClawSuccessMessage(agentId, modelId, currentProvider, verifiedProviders.map((p) => p.provider), modelsPerProvider);
         return;
       }
@@ -476,9 +522,12 @@ async function openclawFlowWithDetection(
     }
   }
 
+  // Prompt for optional Mnemom API key
+  const mnemomApiKey = await promptMnemomApiKey(existingConfig);
+
   // Create smoltbot config
   const firstApiKey = verifiedProviders[0]?.apiKey;
-  const agentId = await createSmoltbotConfig(existingConfig, firstApiKey);
+  const agentId = await createSmoltbotConfig(existingConfig, firstApiKey, mnemomApiKey);
 
   // Show success
   const tracedModeActive = shouldSwitch || alreadyUsingSmoltbot;
@@ -491,6 +540,50 @@ async function openclawFlowWithDetection(
 // ============================================================================
 // Shared helpers
 // ============================================================================
+
+/**
+ * Prompt for optional Mnemom platform API key (billing identity).
+ * The key is created at mnemom.ai/settings/api-keys and sent as
+ * x-mnemom-api-key header to the gateway for quota/billing tracking.
+ */
+async function promptMnemomApiKey(existingConfig: Config | null): Promise<string | undefined> {
+  console.log("─".repeat(50));
+  console.log("\nMnemom API Key (optional)");
+  console.log("If you have a paid plan, enter your Mnemom API key");
+  console.log("for gateway billing and quota tracking.");
+  console.log(`Create one at: ${DASHBOARD_URL}/settings/api-keys\n`);
+
+  if (existingConfig?.mnemomApiKey) {
+    const prefix = existingConfig.mnemomApiKey.slice(0, 8);
+    console.log(`  Existing key: ${prefix}...\n`);
+  }
+
+  if (!isInteractive()) {
+    const envKey = process.env.MNEMOM_API_KEY || "";
+    if (envKey && envKey.startsWith("mnm_")) {
+      console.log("  ✓ Mnemom API key found in MNEMOM_API_KEY\n");
+      return envKey;
+    }
+    console.log("  No MNEMOM_API_KEY env var found, skipping.\n");
+    return existingConfig?.mnemomApiKey;
+  }
+
+  const key = await askInput("Mnemom API key (mnm_..., or press Enter to skip):", true);
+
+  if (!key) {
+    console.log("  Skipped (free tier or configure later)\n");
+    return existingConfig?.mnemomApiKey;
+  }
+
+  if (!key.startsWith("mnm_")) {
+    console.log("  ✗ Invalid format: Mnemom API keys start with mnm_");
+    console.log("  Skipping. You can add it later in ~/.smoltbot/config.json\n");
+    return existingConfig?.mnemomApiKey;
+  }
+
+  console.log("  ✓ Mnemom API key configured\n");
+  return key;
+}
 
 /**
  * Handle existing smoltbot config.
@@ -633,7 +726,8 @@ async function promptModelSwitch(
  */
 async function createSmoltbotConfig(
   existingConfig: Config | null,
-  apiKey?: string
+  apiKey?: string,
+  mnemomApiKey?: string,
 ): Promise<string> {
   const agentId = apiKey
     ? deriveAgentId(apiKey)
@@ -643,6 +737,7 @@ async function createSmoltbotConfig(
     agentId,
     gateway: GATEWAY_URL,
     openclawConfigured: true,
+    ...(mnemomApiKey ? { mnemomApiKey } : {}),
     configuredAt: new Date().toISOString(),
   };
 

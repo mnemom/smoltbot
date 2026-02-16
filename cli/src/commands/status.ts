@@ -85,6 +85,13 @@ export async function statusCommand(): Promise<void> {
   console.log(`Gateway:   ${config.gateway || GATEWAY_URL}`);
   console.log(`Dashboard: ${DASHBOARD_URL}/agents/${config.agentId}`);
 
+  if (config.mnemomApiKey) {
+    const prefix = config.mnemomApiKey.slice(0, 8);
+    console.log(`Mnemom Key: ${prefix}... (billing enabled)`);
+  } else {
+    console.log(`Mnemom Key: Not configured (free tier)`);
+  }
+
   if (config.openclawConfigured) {
     console.log(`Configured: ${config.configuredAt || "yes"}`);
   }
