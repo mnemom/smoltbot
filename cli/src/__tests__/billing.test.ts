@@ -268,7 +268,7 @@ describe("billing", () => {
     });
 
     it("should return undefined when no existing key and user skips", () => {
-      const existingConfig = {
+      const existingConfig: { agentId: string; mnemomApiKey?: string } = {
         agentId: "smolt-abc12345",
         // no mnemomApiKey
       };
