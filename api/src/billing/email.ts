@@ -37,6 +37,10 @@ export async function sendEmail(
         subject: template.subject,
         html: template.html,
         text: template.text,
+        headers: {
+          'List-Unsubscribe': '<https://mnemom.ai/settings/notifications>',
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
       }),
     });
 
@@ -95,6 +99,52 @@ async function logEmail(
 }
 
 // ============================================
+// Shared layout
+// ============================================
+
+function emailLayout(body: string): string {
+  return `<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Mnemom</title>
+</head>
+<body style="margin:0;padding:0;background-color:#F9F8F3;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F9F8F3;">
+    <tr>
+      <td align="center" style="padding:24px 16px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background-color:#ffffff;border-radius:8px;">
+          <tr>
+            <td style="padding:32px 32px 0 32px;">
+              <a href="https://mnemom.ai" style="text-decoration:none;">
+                <img src="https://www.mnemom.ai/images/mnemom_hero.png" alt="Mnemom" width="40" height="37" style="display:block;border:0;outline:none;">
+              </a>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 32px 32px 32px;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:15px;color:#0F172A;line-height:1.6;">
+              ${body}
+            </td>
+          </tr>
+        </table>
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
+          <tr>
+            <td style="padding:16px 32px;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:12px;color:#999;text-align:center;line-height:1.5;">
+              Mnemom, Inc. &middot; Transparent AI Infrastructure<br>
+              <a href="https://mnemom.ai/settings/notifications" style="color:#999;">Email preferences</a>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+// ============================================
 // Email templates
 // ============================================
 
@@ -102,25 +152,49 @@ interface EmailData {
   email: string;
 }
 
+export function emailVerificationEmail(data: { verifyUrl: string }): EmailTemplate {
+  return {
+    subject: 'Verify your Mnemom email address',
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Verify your email</h1>
+      <p style="margin:0 0 16px 0;">Confirm your email address to finish setting up your Mnemom account.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="${data.verifyUrl}" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Verify email address</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 8px 0;font-size:13px;color:#888;">If the button doesn't work, copy and paste this link into your browser:</p>
+      <p style="margin:0 0 16px 0;font-size:13px;color:#888;word-break:break-all;">${data.verifyUrl}</p>
+      <p style="margin:0;font-size:13px;color:#888;">This link expires in 24 hours. If you didn't create a Mnemom account, ignore this email.</p>
+    `),
+    text: `Verify your email
+
+Confirm your email address to finish setting up your Mnemom account.
+
+Verify here: ${data.verifyUrl}
+
+This link expires in 24 hours. If you didn't create a Mnemom account, ignore this email.`,
+  };
+}
+
 export function welcomeDeveloperEmail(data: EmailData): EmailTemplate {
   return {
     subject: 'Welcome to Mnemom Developer',
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Welcome to Mnemom Developer</h1>
-        <p style="color: #444; line-height: 1.6;">Your Developer plan is now active. Integrity checks are billed at $0.01 each, with no monthly minimum.</p>
-        <p style="color: #444; line-height: 1.6;">Your first invoice will be generated at the end of your billing period based on actual usage.</p>
-        <h2 style="color: #1a1a2e; font-size: 18px; margin-top: 24px;">What's included:</h2>
-        <ul style="color: #444; line-height: 1.8;">
-          <li>Managed integrity gateway</li>
-          <li>Private trace storage (30-day retention)</li>
-          <li>OpenTelemetry export</li>
-          <li>Dashboard access</li>
-        </ul>
-        <p style="color: #444; line-height: 1.6;">Manage your subscription anytime from your <a href="https://mnemom.ai/settings/billing" style="color: #4f46e5;">billing settings</a>.</p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Welcome to Mnemom Developer</h1>
+      <p style="margin:0 0 12px 0;">Your Developer plan is now active. Integrity checks are billed at $0.01 each, with no monthly minimum.</p>
+      <p style="margin:0 0 20px 0;">Your first invoice will be generated at the end of your billing period based on actual usage.</p>
+      <h2 style="margin:0 0 12px 0;font-size:17px;color:#0F172A;">What's included</h2>
+      <ul style="margin:0 0 20px 0;padding-left:20px;line-height:1.8;">
+        <li>Managed integrity gateway</li>
+        <li>Private trace storage (30-day retention)</li>
+        <li>OpenTelemetry export</li>
+        <li>Dashboard access</li>
+      </ul>
+      <p style="margin:0;">Manage your subscription anytime from your <a href="https://mnemom.ai/settings/billing" style="color:#D97706;">billing settings</a>.</p>
+    `),
     text: `Welcome to Mnemom Developer
 
 Your Developer plan is now active. Integrity checks are billed at $0.01 each, with no monthly minimum.
@@ -140,23 +214,20 @@ Manage your subscription anytime from your billing settings: https://mnemom.ai/s
 export function welcomeTeamTrialEmail(data: EmailData): EmailTemplate {
   return {
     subject: 'Your 14-day Mnemom Team trial starts now',
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Your Team trial is active</h1>
-        <p style="color: #444; line-height: 1.6;">You have 14 days to explore the full Mnemom Team plan, including 15,000 integrity checks per month, 90-day trace retention, and EU compliance exports.</p>
-        <p style="color: #444; line-height: 1.6;">No charge until your trial ends. Add a payment method anytime to continue uninterrupted.</p>
-        <h2 style="color: #1a1a2e; font-size: 18px; margin-top: 24px;">Team plan highlights:</h2>
-        <ul style="color: #444; line-height: 1.8;">
-          <li>15,000 included integrity checks/month</li>
-          <li>$0.008/check for overages</li>
-          <li>90-day trace retention</li>
-          <li>EU compliance exports</li>
-          <li>Pairwise coherence analysis</li>
-        </ul>
-        <p style="color: #444; line-height: 1.6;">Manage your subscription from <a href="https://mnemom.ai/settings/billing" style="color: #4f46e5;">billing settings</a>.</p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Your Team trial is active</h1>
+      <p style="margin:0 0 12px 0;">You have 14 days to explore the full Mnemom Team plan, including 15,000 integrity checks per month, 90-day trace retention, and EU compliance exports.</p>
+      <p style="margin:0 0 20px 0;">No charge until your trial ends. Add a payment method anytime to continue uninterrupted.</p>
+      <h2 style="margin:0 0 12px 0;font-size:17px;color:#0F172A;">Team plan highlights</h2>
+      <ul style="margin:0 0 20px 0;padding-left:20px;line-height:1.8;">
+        <li>15,000 included integrity checks/month</li>
+        <li>$0.008/check for overages</li>
+        <li>90-day trace retention</li>
+        <li>EU compliance exports</li>
+        <li>Pairwise coherence analysis</li>
+      </ul>
+      <p style="margin:0;">Manage your subscription from <a href="https://mnemom.ai/settings/billing" style="color:#D97706;">billing settings</a>.</p>
+    `),
     text: `Your Team trial is active
 
 You have 14 days to explore the full Mnemom Team plan, including 15,000 integrity checks per month, 90-day trace retention, and EU compliance exports.
@@ -178,17 +249,24 @@ export function invoicePaidEmail(data: EmailData & { amountCents: number; invoic
   const amount = (data.amountCents / 100).toFixed(2);
   return {
     subject: `Mnemom receipt — $${amount}`,
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Payment received</h1>
-        <p style="color: #444; line-height: 1.6;">We've received your payment of <strong>$${amount}</strong>.</p>
-        ${data.invoiceUrl ? `<p style="color: #444; line-height: 1.6;"><a href="${data.invoiceUrl}" style="color: #4f46e5;">View your invoice</a></p>` : ''}
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Payment received</h1>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;background:#F9F8F3;border-radius:8px;">
+        <tr>
+          <td style="padding:20px 24px;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#888;">Amount paid</p>
+            <p style="margin:0;font-size:28px;font-weight:700;color:#0F172A;">$${amount}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px 0;">Thanks for your payment. No action is needed on your end.</p>
+      ${data.invoiceUrl ? `<p style="margin:0;"><a href="${data.invoiceUrl}" style="color:#D97706;font-weight:600;">View invoice details</a></p>` : ''}
+    `),
     text: `Payment received
 
-We've received your payment of $${amount}.${data.invoiceUrl ? `\n\nView your invoice: ${data.invoiceUrl}` : ''}`,
+Amount paid: $${amount}
+
+Thanks for your payment. No action is needed on your end.${data.invoiceUrl ? `\n\nView invoice details: ${data.invoiceUrl}` : ''}`,
   };
 }
 
@@ -200,15 +278,18 @@ export function paymentFailedEmail(data: EmailData, attemptNumber: number): Emai
 
   return {
     subject: `Action needed: Mnemom payment failed (${urgency} notice)`,
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #dc2626; font-size: 24px;">Payment failed</h1>
-        <p style="color: #444; line-height: 1.6;">We were unable to process your payment (attempt ${attemptNumber}).</p>
-        <p style="color: #444; line-height: 1.6;">${warning}</p>
-        <p style="color: #444; line-height: 1.6;"><a href="https://mnemom.ai/settings/billing" style="color: #4f46e5; font-weight: 600;">Update payment method</a></p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#dc2626;">Payment failed</h1>
+      <p style="margin:0 0 12px 0;">We were unable to process your payment (attempt ${attemptNumber}).</p>
+      <p style="margin:0 0 20px 0;">${warning}</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="https://mnemom.ai/settings/billing" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Update payment method</a>
+          </td>
+        </tr>
+      </table>
+    `),
     text: `Payment failed
 
 We were unable to process your payment (attempt ${attemptNumber}).
@@ -226,15 +307,18 @@ export function trialEndingEmail(data: EmailData & { trialEndDate?: string }): E
 
   return {
     subject: 'Your Mnemom Team trial ends soon',
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Your trial ends ${dateStr}</h1>
-        <p style="color: #444; line-height: 1.6;">Add a payment method to keep your Team plan active. Your agents, traces, and configuration will remain exactly as they are.</p>
-        <p style="color: #444; line-height: 1.6;">Without a payment method, you'll be moved to the Free plan when the trial ends.</p>
-        <p style="color: #444; line-height: 1.6;"><a href="https://mnemom.ai/settings/billing" style="color: #4f46e5; font-weight: 600;">Add payment method</a></p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Your trial ends ${dateStr}</h1>
+      <p style="margin:0 0 12px 0;">Add a payment method to keep your Team plan active. Your agents, traces, and configuration will remain exactly as they are.</p>
+      <p style="margin:0 0 20px 0;">Without a payment method, you'll be moved to the Free plan when the trial ends.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="https://mnemom.ai/settings/billing" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Add payment method</a>
+          </td>
+        </tr>
+      </table>
+    `),
     text: `Your trial ends ${dateStr}
 
 Add a payment method to keep your Team plan active. Your agents, traces, and configuration will remain exactly as they are.
@@ -248,15 +332,18 @@ Add payment method: https://mnemom.ai/settings/billing`,
 export function trialExpiredEmail(data: EmailData): EmailTemplate {
   return {
     subject: 'Your Mnemom trial has ended — your data is safe',
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Your trial has ended</h1>
-        <p style="color: #444; line-height: 1.6;">Your account has been moved to the Free plan. <strong>Your agents, traces, alignment cards, and all configuration are fully preserved.</strong></p>
-        <p style="color: #444; line-height: 1.6;">Add a payment method anytime to restore your Team plan — you'll pick up right where you left off, with zero data loss.</p>
-        <p style="color: #444; line-height: 1.6;"><a href="https://mnemom.ai/settings/billing" style="color: #4f46e5; font-weight: 600;">Resubscribe now</a></p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Your trial has ended</h1>
+      <p style="margin:0 0 12px 0;">Your account has been moved to the Free plan. <strong>Your agents, traces, alignment cards, and all configuration are fully preserved.</strong></p>
+      <p style="margin:0 0 20px 0;">Add a payment method anytime to restore your Team plan — you'll pick up right where you left off, with zero data loss.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="https://mnemom.ai/settings/billing" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Resubscribe now</a>
+          </td>
+        </tr>
+      </table>
+    `),
     text: `Your trial has ended
 
 Your account has been moved to the Free plan. Your agents, traces, alignment cards, and all configuration are fully preserved.
@@ -270,15 +357,12 @@ Resubscribe now: https://mnemom.ai/settings/billing`,
 export function subscriptionCanceledEmail(data: EmailData): EmailTemplate {
   return {
     subject: 'Your Mnemom subscription has ended',
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Subscription ended</h1>
-        <p style="color: #444; line-height: 1.6;">Your Mnemom subscription has been canceled. Your account is now on the Free plan.</p>
-        <p style="color: #444; line-height: 1.6;"><strong>Your data is safe.</strong> All agents, traces, and configuration are preserved. You can resubscribe anytime to restore full access.</p>
-        <p style="color: #444; line-height: 1.6;"><a href="https://mnemom.ai/settings/billing" style="color: #4f46e5; font-weight: 600;">Resubscribe</a></p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Subscription ended</h1>
+      <p style="margin:0 0 12px 0;">Your Mnemom subscription has been canceled. Your account is now on the Free plan.</p>
+      <p style="margin:0 0 20px 0;"><strong>Your data is safe.</strong> All agents, traces, and configuration are preserved. You can resubscribe anytime to restore full access.</p>
+      <p style="margin:0;"><a href="https://mnemom.ai/settings/billing" style="color:#D97706;font-weight:600;">Resubscribe</a></p>
+    `),
     text: `Subscription ended
 
 Your Mnemom subscription has been canceled. Your account is now on the Free plan.
@@ -294,16 +378,13 @@ export function planUpgradeEmail(data: EmailData & { newPlan: string; proratedCh
   const featureListText = data.features.map(f => `- ${f}`).join('\n');
   return {
     subject: `You've upgraded to Mnemom ${data.newPlan}`,
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Welcome to ${data.newPlan}</h1>
-        <p style="color: #444; line-height: 1.6;">Your upgrade is now active.${data.proratedCharge ? ` A prorated charge of <strong>${data.proratedCharge}</strong> has been applied to your account.` : ''}</p>
-        <h2 style="color: #1a1a2e; font-size: 18px; margin-top: 24px;">New features unlocked:</h2>
-        <ul style="color: #444; line-height: 1.8;">${featureList}</ul>
-        <p style="color: #444; line-height: 1.6;">Manage your subscription from <a href="https://mnemom.ai/settings/billing" style="color: #4f46e5;">billing settings</a>.</p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Welcome to ${data.newPlan}</h1>
+      <p style="margin:0 0 20px 0;">Your upgrade is now active.${data.proratedCharge ? ` A prorated charge of <strong>${data.proratedCharge}</strong> has been applied to your account.` : ''}</p>
+      <h2 style="margin:0 0 12px 0;font-size:17px;color:#0F172A;">New features unlocked</h2>
+      <ul style="margin:0 0 20px 0;padding-left:20px;line-height:1.8;">${featureList}</ul>
+      <p style="margin:0;">Manage your subscription from <a href="https://mnemom.ai/settings/billing" style="color:#D97706;">billing settings</a>.</p>
+    `),
     text: `Welcome to ${data.newPlan}
 
 Your upgrade is now active.${data.proratedCharge ? ` A prorated charge of ${data.proratedCharge} has been applied.` : ''}
@@ -320,18 +401,15 @@ export function planDowngradeScheduledEmail(data: EmailData & { currentPlan: str
   const featureList = data.losingFeatures.map(f => `<li>${f}</li>`).join('');
   const featureListText = data.losingFeatures.map(f => `- ${f}`).join('\n');
   return {
-    subject: `Mnemom plan change scheduled`,
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Downgrade scheduled</h1>
-        <p style="color: #444; line-height: 1.6;">Your plan will change from <strong>${data.currentPlan}</strong> to <strong>${data.newPlan}</strong> on <strong>${dateStr}</strong>.</p>
-        <p style="color: #444; line-height: 1.6;">You'll continue to have full ${data.currentPlan} access until then.</p>
-        <h2 style="color: #1a1a2e; font-size: 18px; margin-top: 24px;">Features you'll lose:</h2>
-        <ul style="color: #444; line-height: 1.8;">${featureList}</ul>
-        <p style="color: #444; line-height: 1.6;">Changed your mind? <a href="https://mnemom.ai/settings/billing" style="color: #4f46e5;">Cancel the downgrade</a> anytime before ${dateStr}.</p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    subject: 'Mnemom plan change scheduled',
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Downgrade scheduled</h1>
+      <p style="margin:0 0 12px 0;">Your plan will change from <strong>${data.currentPlan}</strong> to <strong>${data.newPlan}</strong> on <strong>${dateStr}</strong>.</p>
+      <p style="margin:0 0 20px 0;">You'll continue to have full ${data.currentPlan} access until then.</p>
+      <h2 style="margin:0 0 12px 0;font-size:17px;color:#0F172A;">Features you'll lose</h2>
+      <ul style="margin:0 0 20px 0;padding-left:20px;line-height:1.8;">${featureList}</ul>
+      <p style="margin:0;">Changed your mind? <a href="https://mnemom.ai/settings/billing" style="color:#D97706;">Cancel the downgrade</a> anytime before ${dateStr}.</p>
+    `),
     text: `Downgrade scheduled
 
 Your plan will change from ${data.currentPlan} to ${data.newPlan} on ${dateStr}.
@@ -348,15 +426,19 @@ Cancel the downgrade anytime: https://mnemom.ai/settings/billing`,
 export function usageWarningEmail(data: EmailData & { usagePercent: number; checksUsed: number; checksIncluded: number; planName: string }): EmailTemplate {
   return {
     subject: `Mnemom usage alert — ${data.usagePercent}% of included checks used`,
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #d97706; font-size: 24px;">Usage alert</h1>
-        <p style="color: #444; line-height: 1.6;">You've used <strong>${data.checksUsed.toLocaleString()}</strong> of your <strong>${data.checksIncluded.toLocaleString()}</strong> included integrity checks this period (${data.usagePercent}%).</p>
-        <p style="color: #444; line-height: 1.6;">Once you exceed your included checks, overage billing will begin automatically.</p>
-        <p style="color: #444; line-height: 1.6;"><a href="https://mnemom.ai/settings/billing" style="color: #4f46e5; font-weight: 600;">View usage details</a> &nbsp;|&nbsp; <a href="https://mnemom.ai/pricing" style="color: #4f46e5; font-weight: 600;">Upgrade plan</a></p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#d97706;">Usage alert</h1>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#F9F8F3;border-radius:8px;">
+        <tr>
+          <td style="padding:20px 24px;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#888;">Integrity checks used</p>
+            <p style="margin:0;font-size:22px;font-weight:700;color:#0F172A;">${data.checksUsed.toLocaleString()} <span style="font-size:15px;font-weight:400;color:#888;">/ ${data.checksIncluded.toLocaleString()}</span></p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 20px 0;">Once you exceed your included checks, overage billing will begin automatically.</p>
+      <p style="margin:0;"><a href="https://mnemom.ai/settings/billing" style="color:#D97706;font-weight:600;">View usage details</a> &nbsp;&middot;&nbsp; <a href="https://mnemom.ai/pricing" style="color:#D97706;font-weight:600;">Upgrade plan</a></p>
+    `),
     text: `Usage alert
 
 You've used ${data.checksUsed.toLocaleString()} of your ${data.checksIncluded.toLocaleString()} included integrity checks this period (${data.usagePercent}%).
@@ -372,15 +454,12 @@ export function usageLimitReachedEmail(data: EmailData & { checksUsed: number; c
   const overagePrice = `$${data.perCheckPrice.toFixed(3)}`;
   return {
     subject: 'Mnemom — included checks exhausted, overage billing active',
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #dc2626; font-size: 24px;">Included checks exhausted</h1>
-        <p style="color: #444; line-height: 1.6;">You've used all <strong>${data.checksIncluded.toLocaleString()}</strong> included integrity checks this period.</p>
-        <p style="color: #444; line-height: 1.6;">Additional checks will be billed at <strong>${overagePrice}/check</strong>. Your service is uninterrupted.</p>
-        <p style="color: #444; line-height: 1.6;"><a href="https://mnemom.ai/pricing" style="color: #4f46e5; font-weight: 600;">Upgrade for more included checks</a></p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#dc2626;">Included checks exhausted</h1>
+      <p style="margin:0 0 12px 0;">You've used all <strong>${data.checksIncluded.toLocaleString()}</strong> included integrity checks this period.</p>
+      <p style="margin:0 0 20px 0;">Additional checks will be billed at <strong>${overagePrice}/check</strong>. Your service is uninterrupted.</p>
+      <p style="margin:0;"><a href="https://mnemom.ai/pricing" style="color:#D97706;font-weight:600;">Upgrade for more included checks</a></p>
+    `),
     text: `Included checks exhausted
 
 You've used all ${data.checksIncluded.toLocaleString()} included integrity checks this period.
@@ -396,15 +475,19 @@ export function budgetAlertEmail(data: EmailData & { currentCostCents: number; b
   const budget = `$${(data.budgetCents / 100).toFixed(2)}`;
   return {
     subject: `Mnemom budget alert — spending at ${current}`,
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #dc2626; font-size: 24px;">Budget threshold reached</h1>
-        <p style="color: #444; line-height: 1.6;">Your current period spending has reached <strong>${current}</strong>, which exceeds your budget alert threshold of <strong>${budget}</strong>.</p>
-        <p style="color: #444; line-height: 1.6;">This is an alert only — your service is uninterrupted. You can adjust your budget threshold or upgrade your plan to include more checks.</p>
-        <p style="color: #444; line-height: 1.6;"><a href="https://mnemom.ai/settings/billing" style="color: #4f46e5; font-weight: 600;">Review spending</a></p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#dc2626;">Budget threshold reached</h1>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#F9F8F3;border-radius:8px;">
+        <tr>
+          <td style="padding:20px 24px;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#888;">Current spend / Budget</p>
+            <p style="margin:0;font-size:22px;font-weight:700;color:#0F172A;">${current} <span style="font-size:15px;font-weight:400;color:#888;">/ ${budget}</span></p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 20px 0;">This is an alert only — your service is uninterrupted. You can adjust your budget threshold or upgrade your plan to include more checks.</p>
+      <p style="margin:0;"><a href="https://mnemom.ai/settings/billing" style="color:#D97706;font-weight:600;">Review spending</a></p>
+    `),
     text: `Budget threshold reached
 
 Your current period spending has reached ${current}, which exceeds your budget alert threshold of ${budget}.
@@ -418,19 +501,20 @@ Review spending: https://mnemom.ai/settings/billing`,
 export function trialProgressEmail(data: EmailData & { checksUsed: number; agentsLinked: number; daysUsed: number }): EmailTemplate {
   return {
     subject: 'Your Mnemom trial — day 3 check-in',
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">How's your trial going?</h1>
-        <p style="color: #444; line-height: 1.6;">You're ${data.daysUsed} days into your Mnemom Team trial. Here's your progress:</p>
-        <div style="background: #f8fafc; border-radius: 8px; padding: 16px; margin: 16px 0;">
-          <p style="color: #444; margin: 4px 0;"><strong>${data.checksUsed.toLocaleString()}</strong> integrity checks performed</p>
-          <p style="color: #444; margin: 4px 0;"><strong>${data.agentsLinked}</strong> agent${data.agentsLinked === 1 ? '' : 's'} linked</p>
-        </div>
-        ${data.checksUsed === 0 ? '<p style="color: #444; line-height: 1.6;">Need help getting started? Point your agent at the gateway and integrity checks happen automatically.</p>' : '<p style="color: #444; line-height: 1.6;">Great progress! Your agents are building integrity history that you can review anytime.</p>'}
-        <p style="color: #444; line-height: 1.6;"><a href="https://mnemom.ai/settings/billing" style="color: #4f46e5; font-weight: 600;">View your dashboard</a></p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">How's your trial going?</h1>
+      <p style="margin:0 0 16px 0;">You're ${data.daysUsed} days into your Mnemom Team trial. Here's your progress:</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#F9F8F3;border-radius:8px;">
+        <tr>
+          <td style="padding:20px 24px;">
+            <p style="margin:0 0 8px 0;"><strong>${data.checksUsed.toLocaleString()}</strong> integrity checks performed</p>
+            <p style="margin:0;"><strong>${data.agentsLinked}</strong> agent${data.agentsLinked === 1 ? '' : 's'} linked</p>
+          </td>
+        </tr>
+      </table>
+      ${data.checksUsed === 0 ? '<p style="margin:0 0 20px 0;">Need help getting started? Point your agent at the gateway and integrity checks happen automatically.</p>' : '<p style="margin:0 0 20px 0;">Great progress! Your agents are building integrity history that you can review anytime.</p>'}
+      <p style="margin:0;"><a href="https://mnemom.ai/settings/billing" style="color:#D97706;font-weight:600;">View your dashboard</a></p>
+    `),
     text: `How's your trial going?
 
 You're ${data.daysUsed} days into your Mnemom Team trial. Here's your progress:
@@ -447,16 +531,19 @@ View your dashboard: https://mnemom.ai/settings/billing`,
 export function orgInviteEmail(data: { inviterName: string; orgName: string; acceptUrl: string }): EmailTemplate {
   return {
     subject: `${data.inviterName} invited you to join ${data.orgName} on Mnemom`,
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">You've been invited to ${data.orgName}</h1>
-        <p style="color: #444; line-height: 1.6;"><strong>${data.inviterName}</strong> has invited you to join <strong>${data.orgName}</strong> on Mnemom.</p>
-        <p style="color: #444; line-height: 1.6;">Click the button below to accept the invitation and join the organization.</p>
-        <p style="margin: 24px 0;"><a href="${data.acceptUrl}" style="display: inline-block; background: #4f46e5; color: #ffffff; text-decoration: none; padding: 12px 24px; border-radius: 6px; font-weight: 600;">Accept Invitation</a></p>
-        <p style="color: #444; line-height: 1.6;">This invitation will expire in 7 days. If you did not expect this invitation, you can safely ignore this email.</p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">You've been invited to ${data.orgName}</h1>
+      <p style="margin:0 0 12px 0;"><strong>${data.inviterName}</strong> has invited you to join <strong>${data.orgName}</strong> on Mnemom.</p>
+      <p style="margin:0 0 20px 0;">Click the button below to accept the invitation and join the organization.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="${data.acceptUrl}" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Accept Invitation</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#888;">This invitation will expire in 7 days. If you did not expect this invitation, you can safely ignore this email.</p>
+    `),
     text: `You've been invited to ${data.orgName}
 
 ${data.inviterName} has invited you to join ${data.orgName} on Mnemom.
@@ -471,14 +558,11 @@ This invitation will expire in 7 days. If you did not expect this invitation, yo
 export function orgRoleChangeEmail(data: { orgName: string; oldRole: string; newRole: string }): EmailTemplate {
   return {
     subject: `Your role in ${data.orgName} has been updated`,
-    html: `
-      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 16px;">
-        <h1 style="color: #1a1a2e; font-size: 24px;">Role updated in ${data.orgName}</h1>
-        <p style="color: #444; line-height: 1.6;">Your role in <strong>${data.orgName}</strong> has been changed from <strong>${data.oldRole}</strong> to <strong>${data.newRole}</strong>.</p>
-        <p style="color: #444; line-height: 1.6;">This change is effective immediately. If you have any questions, please contact your organization administrator.</p>
-        <p style="color: #888; font-size: 13px; margin-top: 32px;">Mnemom &mdash; Transparent AI Infrastructure</p>
-      </div>
-    `,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Role updated in ${data.orgName}</h1>
+      <p style="margin:0 0 12px 0;">Your role in <strong>${data.orgName}</strong> has been changed from <strong>${data.oldRole}</strong> to <strong>${data.newRole}</strong>.</p>
+      <p style="margin:0;">This change is effective immediately. If you have any questions, please contact your organization administrator.</p>
+    `),
     text: `Role updated in ${data.orgName}
 
 Your role in ${data.orgName} has been changed from ${data.oldRole} to ${data.newRole}.
