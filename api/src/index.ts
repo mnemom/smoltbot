@@ -82,6 +82,26 @@ import {
   handleRevokeOrgApiKey,
 } from './org/handlers';
 import { getOrgMembership } from './org/rbac';
+import {
+  handleAdminRevenueDashboard,
+  handleAdminCustomerList,
+  handleAdminCustomerDetail,
+  handleAdminAddNote,
+  handleAdminSuspendAccount,
+  handleAdminUnsuspendAccount,
+  handleAdminIssueCreditNote,
+  handleAdminGenerateInvoice,
+  handleAdminImpersonate,
+  handleAdminConversionFunnel,
+  handleAdminExportRevenue,
+  handleAdminExportCustomers,
+  handleAdminExportUsageAggregate,
+  handleAdminExportTax,
+  handleAdminListCoupons,
+  handleAdminCreateCoupon,
+  handleAdminDeactivateCoupon,
+  handleAdminApplyCoupon,
+} from './admin/handlers';
 
 export interface Env {
   SUPABASE_URL: string;
@@ -3990,6 +4010,109 @@ export default {
       const adminUserDeleteMatch = path.match(/^\/v1\/admin\/users\/([^/]+)$/);
       if (adminUserDeleteMatch && method === 'DELETE') {
         return handleAdminDeleteUser(env, adminUserDeleteMatch[1], request);
+      }
+
+      // ============================================
+      // PHASE 6: ADMIN REVENUE & OPERATIONS ROUTES
+      // ============================================
+
+      // GET /v1/admin/revenue
+      if (path === '/v1/admin/revenue' && method === 'GET') {
+        return handleAdminRevenueDashboard(env as unknown as BillingEnv, request, requireAdmin as any);
+      }
+
+      // GET /v1/admin/customers
+      if (path === '/v1/admin/customers' && method === 'GET') {
+        return handleAdminCustomerList(env as unknown as BillingEnv, request, requireAdmin as any, url);
+      }
+
+      // GET /v1/admin/customers/:userId
+      const adminCustomerDetailMatch = path.match(/^\/v1\/admin\/customers\/([^/]+)$/);
+      if (adminCustomerDetailMatch && method === 'GET') {
+        return handleAdminCustomerDetail(env as unknown as BillingEnv, request, requireAdmin as any, adminCustomerDetailMatch[1]);
+      }
+
+      // POST /v1/admin/customers/:userId/notes
+      const adminCustomerNotesMatch = path.match(/^\/v1\/admin\/customers\/([^/]+)\/notes$/);
+      if (adminCustomerNotesMatch && method === 'POST') {
+        return handleAdminAddNote(env as unknown as BillingEnv, request, requireAdmin as any, adminCustomerNotesMatch[1]);
+      }
+
+      // POST /v1/admin/users/:userId/suspend
+      const adminSuspendMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/suspend$/);
+      if (adminSuspendMatch && method === 'POST') {
+        return handleAdminSuspendAccount(env as unknown as BillingEnv, request, requireAdmin as any, adminSuspendMatch[1]);
+      }
+
+      // POST /v1/admin/users/:userId/unsuspend
+      const adminUnsuspendMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/unsuspend$/);
+      if (adminUnsuspendMatch && method === 'POST') {
+        return handleAdminUnsuspendAccount(env as unknown as BillingEnv, request, requireAdmin as any, adminUnsuspendMatch[1]);
+      }
+
+      // POST /v1/admin/users/:userId/billing/credit-note
+      const adminCreditNoteMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing\/credit-note$/);
+      if (adminCreditNoteMatch && method === 'POST') {
+        return handleAdminIssueCreditNote(env as unknown as BillingEnv, request, requireAdmin as any, adminCreditNoteMatch[1]);
+      }
+
+      // POST /v1/admin/users/:userId/billing/invoice
+      const adminInvoiceMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing\/invoice$/);
+      if (adminInvoiceMatch && method === 'POST') {
+        return handleAdminGenerateInvoice(env as unknown as BillingEnv, request, requireAdmin as any, adminInvoiceMatch[1]);
+      }
+
+      // POST /v1/admin/users/:userId/impersonate
+      const adminImpersonateMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/impersonate$/);
+      if (adminImpersonateMatch && method === 'POST') {
+        return handleAdminImpersonate(env as unknown as BillingEnv, request, requireAdmin as any, adminImpersonateMatch[1]);
+      }
+
+      // POST /v1/admin/users/:userId/billing/coupon
+      const adminApplyCouponMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing\/coupon$/);
+      if (adminApplyCouponMatch && method === 'POST') {
+        return handleAdminApplyCoupon(env as unknown as BillingEnv, request, requireAdmin as any, adminApplyCouponMatch[1]);
+      }
+
+      // GET /v1/admin/analytics/funnel
+      if (path === '/v1/admin/analytics/funnel' && method === 'GET') {
+        return handleAdminConversionFunnel(env as unknown as BillingEnv, request, requireAdmin as any, url);
+      }
+
+      // GET /v1/admin/exports/revenue
+      if (path === '/v1/admin/exports/revenue' && method === 'GET') {
+        return handleAdminExportRevenue(env as unknown as BillingEnv, request, requireAdmin as any, url);
+      }
+
+      // GET /v1/admin/exports/customers
+      if (path === '/v1/admin/exports/customers' && method === 'GET') {
+        return handleAdminExportCustomers(env as unknown as BillingEnv, request, requireAdmin as any);
+      }
+
+      // GET /v1/admin/exports/usage
+      if (path === '/v1/admin/exports/usage' && method === 'GET') {
+        return handleAdminExportUsageAggregate(env as unknown as BillingEnv, request, requireAdmin as any, url);
+      }
+
+      // GET /v1/admin/exports/tax
+      if (path === '/v1/admin/exports/tax' && method === 'GET') {
+        return handleAdminExportTax(env as unknown as BillingEnv, request, requireAdmin as any, url);
+      }
+
+      // GET /v1/admin/coupons
+      if (path === '/v1/admin/coupons' && method === 'GET') {
+        return handleAdminListCoupons(env as unknown as BillingEnv, request, requireAdmin as any);
+      }
+
+      // POST /v1/admin/coupons
+      if (path === '/v1/admin/coupons' && method === 'POST') {
+        return handleAdminCreateCoupon(env as unknown as BillingEnv, request, requireAdmin as any);
+      }
+
+      // DELETE /v1/admin/coupons/:couponId
+      const adminCouponDeleteMatch = path.match(/^\/v1\/admin\/coupons\/([^/]+)$/);
+      if (adminCouponDeleteMatch && method === 'DELETE') {
+        return handleAdminDeactivateCoupon(env as unknown as BillingEnv, request, requireAdmin as any, adminCouponDeleteMatch[1]);
       }
 
       // 404 for unmatched routes

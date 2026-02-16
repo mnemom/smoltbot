@@ -92,6 +92,7 @@ export interface QuotaContext {
   account_id: string | null;
   current_period_end: string | null;
   past_due_since: string | null;
+  is_suspended: boolean;
 }
 
 export interface QuotaDecision {
@@ -114,6 +115,7 @@ export const FREE_TIER_CONTEXT: QuotaContext = {
   account_id: null,
   current_period_end: null,
   past_due_since: null,
+  is_suspended: false,
 };
 
 // ============================================================================
@@ -184,6 +186,15 @@ export async function resolveQuotaContext(
  */
 export function evaluateQuota(context: QuotaContext): QuotaDecision {
   const headers: Record<string, string> = {};
+
+  // Suspended accounts are always rejected — overrides all other logic including free tier
+  if (context.is_suspended) {
+    return {
+      action: 'reject',
+      reason: 'account_suspended',
+      headers,
+    };
+  }
 
   // Free tier / no billing model → always allow (pass-through)
   if (context.plan_id === 'plan-free' || context.billing_model === 'none') {

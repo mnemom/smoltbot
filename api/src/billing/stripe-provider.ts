@@ -12,6 +12,7 @@ import type {
   UpdateSubscriptionParams,
   InvoiceInfo,
   WebhookEvent,
+  CouponInfo,
 } from './types';
 
 let stripeInstance: Stripe | null = null;
@@ -175,6 +176,134 @@ export function createStripeProvider(secretKey: string): BillingProvider {
         },
       };
     },
+
+    async createCreditNote(params) {
+      // Find the latest paid invoice for this customer
+      const invoices = await stripe.invoices.list({
+        customer: params.customerId,
+        status: 'paid',
+        limit: 1,
+      });
+
+      if (invoices.data.length === 0) {
+        throw new Error('No paid invoice found for credit note');
+      }
+
+      const creditNote = await stripe.creditNotes.create({
+        invoice: invoices.data[0].id,
+        lines: [
+          {
+            type: 'custom_line_item',
+            unit_amount: params.amountCents,
+            quantity: 1,
+            description: params.reason ?? 'Admin-issued credit note',
+          },
+        ],
+        memo: params.reason ?? 'Admin-issued credit note',
+      });
+
+      return {
+        id: creditNote.id,
+        status: creditNote.status ?? 'issued',
+      };
+    },
+
+    async createManualInvoice(params) {
+      // Create an invoice item
+      await stripe.invoiceItems.create({
+        customer: params.customerId,
+        amount: params.amountCents,
+        currency: 'usd',
+        description: params.description,
+      });
+
+      // Create and finalize the invoice
+      const invoice = await stripe.invoices.create({
+        customer: params.customerId,
+        auto_advance: true,
+        collection_method: 'send_invoice',
+        days_until_due: 30,
+      });
+
+      const finalized = await stripe.invoices.finalizeInvoice(invoice.id);
+      await stripe.invoices.sendInvoice(finalized.id);
+
+      return {
+        id: finalized.id,
+        status: finalized.status ?? 'open',
+        hostedInvoiceUrl: finalized.hosted_invoice_url ?? null,
+      };
+    },
+
+    async listCoupons(limit = 20) {
+      const coupons = await stripe.coupons.list({ limit });
+
+      const results: CouponInfo[] = [];
+      for (const coupon of coupons.data) {
+        // Fetch promotion codes for this coupon
+        const promoCodes = await stripe.promotionCodes.list({
+          coupon: coupon.id,
+          limit: 10,
+        });
+
+        results.push(mapCoupon(coupon, promoCodes.data));
+      }
+
+      return results;
+    },
+
+    async createCoupon(params) {
+      const couponParams: Stripe.CouponCreateParams = {
+        name: params.name,
+        duration: params.duration,
+      };
+
+      if (params.percentOff !== undefined) {
+        couponParams.percent_off = params.percentOff;
+      } else if (params.amountOff !== undefined) {
+        couponParams.amount_off = params.amountOff;
+        couponParams.currency = params.currency ?? 'usd';
+      }
+
+      if (params.duration === 'repeating' && params.durationInMonths) {
+        couponParams.duration_in_months = params.durationInMonths;
+      }
+
+      const coupon = await stripe.coupons.create(couponParams);
+
+      let promoCodes: Stripe.PromotionCode[] = [];
+      if (params.promotionCode) {
+        const promoCode = await stripe.promotionCodes.create({
+          coupon: coupon.id,
+          code: params.promotionCode,
+        });
+        promoCodes = [promoCode];
+      }
+
+      return mapCoupon(coupon, promoCodes);
+    },
+
+    async createPromotionCode(params) {
+      const promoCode = await stripe.promotionCodes.create({
+        coupon: params.couponId,
+        code: params.code,
+      });
+
+      return {
+        id: promoCode.id,
+        code: promoCode.code,
+      };
+    },
+
+    async deactivateCoupon(couponId: string) {
+      await stripe.coupons.del(couponId);
+    },
+
+    async applyCustomerCoupon(params) {
+      await stripe.customers.update(params.customerId, {
+        coupon: params.couponId,
+      });
+    },
   };
 }
 
@@ -202,6 +331,25 @@ function mapSubscription(sub: Stripe.Subscription): SubscriptionInfo {
     cancelAtPeriodEnd: sub.cancel_at_period_end,
     trialEnd: sub.trial_end,
     items,
+  };
+}
+
+function mapCoupon(coupon: Stripe.Coupon, promoCodes: Stripe.PromotionCode[]): CouponInfo {
+  return {
+    id: coupon.id,
+    name: coupon.name,
+    percentOff: coupon.percent_off ?? null,
+    amountOff: coupon.amount_off ?? null,
+    currency: coupon.currency ?? null,
+    duration: coupon.duration,
+    durationInMonths: coupon.duration_in_months ?? null,
+    valid: coupon.valid,
+    promotionCodes: promoCodes.map((pc) => ({
+      id: pc.id,
+      code: pc.code,
+      active: pc.active,
+    })),
+    created: coupon.created,
   };
 }
 

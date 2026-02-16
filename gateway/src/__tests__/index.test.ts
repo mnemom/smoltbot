@@ -801,6 +801,7 @@ describe('evaluateQuota', () => {
       account_id: 'ba-test',
       current_period_end: '2026-03-15T00:00:00Z',
       past_due_since: null,
+      is_suspended: false,
       ...overrides,
     };
   }
@@ -929,6 +930,28 @@ describe('evaluateQuota', () => {
     }));
     expect(decision.action).toBe('allow');
     expect(decision.headers['X-Mnemom-Usage-Percent']).toBe('50');
+  });
+
+  it('should reject suspended active account', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-team',
+      billing_model: 'subscription_plus_metered',
+      subscription_status: 'active',
+      is_suspended: true,
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('account_suspended');
+  });
+
+  it('should reject suspended free-tier account', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-free',
+      billing_model: 'none',
+      subscription_status: 'none',
+      is_suspended: true,
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('account_suspended');
   });
 });
 

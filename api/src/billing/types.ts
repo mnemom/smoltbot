@@ -49,6 +49,42 @@ export interface BillingProvider {
     signature: string,
     secret: string
   ): Promise<WebhookEvent>;
+
+  createCreditNote(params: {
+    customerId: string;
+    amountCents: number;
+    reason?: string;
+  }): Promise<{ id: string; status: string }>;
+
+  createManualInvoice(params: {
+    customerId: string;
+    amountCents: number;
+    description: string;
+  }): Promise<{ id: string; status: string; hostedInvoiceUrl: string | null }>;
+
+  listCoupons(limit?: number): Promise<CouponInfo[]>;
+
+  createCoupon(params: {
+    name: string;
+    percentOff?: number;
+    amountOff?: number;
+    currency?: string;
+    duration: 'once' | 'repeating' | 'forever';
+    durationInMonths?: number;
+    promotionCode?: string;
+  }): Promise<CouponInfo>;
+
+  createPromotionCode(params: {
+    couponId: string;
+    code: string;
+  }): Promise<{ id: string; code: string }>;
+
+  deactivateCoupon(couponId: string): Promise<void>;
+
+  applyCustomerCoupon(params: {
+    customerId: string;
+    couponId: string;
+  }): Promise<void>;
 }
 
 // ============================================
@@ -127,6 +163,23 @@ export interface WebhookEvent {
   data: {
     object: Record<string, unknown>;
   };
+}
+
+// ============================================
+// Coupon
+// ============================================
+
+export interface CouponInfo {
+  id: string;
+  name: string | null;
+  percentOff: number | null;
+  amountOff: number | null;
+  currency: string | null;
+  duration: string;
+  durationInMonths: number | null;
+  valid: boolean;
+  promotionCodes: Array<{ id: string; code: string; active: boolean }>;
+  created: number;
 }
 
 // ============================================

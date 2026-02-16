@@ -555,6 +555,44 @@ This invitation will expire in 7 days. If you did not expect this invitation, yo
   };
 }
 
+export function accountSuspendedEmail(data: { reason: string }): EmailTemplate {
+  return {
+    subject: 'Your Mnemom account has been suspended',
+    html: emailLayout(`
+      <div style="background:#dc2626;padding:16px 24px;border-radius:8px 8px 0 0;margin:-24px -32px 24px -32px;">
+        <h1 style="margin:0;font-size:22px;color:#ffffff;">Account Suspended</h1>
+      </div>
+      <p style="margin:0 0 12px 0;">Your Mnemom account has been suspended by an administrator.</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#FEF2F2;border-radius:8px;border:1px solid #FECACA;">
+        <tr>
+          <td style="padding:16px 20px;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#991B1B;font-weight:600;">Reason</p>
+            <p style="margin:0;color:#991B1B;">${data.reason}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px 0;">While your account is suspended, all gateway API requests will be blocked. Your data remains intact and will be accessible once the suspension is lifted.</p>
+      <p style="margin:0 0 20px 0;">If you believe this is an error, please contact our support team.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="mailto:support@mnemom.ai" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Contact Support</a>
+          </td>
+        </tr>
+      </table>
+    `),
+    text: `Account Suspended
+
+Your Mnemom account has been suspended by an administrator.
+
+Reason: ${data.reason}
+
+While your account is suspended, all gateway API requests will be blocked. Your data remains intact and will be accessible once the suspension is lifted.
+
+If you believe this is an error, please contact support: support@mnemom.ai`,
+  };
+}
+
 export function orgRoleChangeEmail(data: { orgName: string; oldRole: string; newRole: string }): EmailTemplate {
   return {
     subject: `Your role in ${data.orgName} has been updated`,
