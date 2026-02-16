@@ -41,7 +41,9 @@ export function createStripeProvider(secretKey: string): BillingProvider {
 
     async createCheckoutSession(params: CheckoutSessionParams) {
       const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
-        { price: params.priceId, quantity: 1 },
+        params.isMeteredPrice
+          ? { price: params.priceId }
+          : { price: params.priceId, quantity: 1 },
       ];
 
       // Add metered price components (e.g., Team overage)

@@ -58,6 +58,8 @@ export interface BillingProvider {
 export interface CheckoutSessionParams {
   customerId: string;
   priceId: string;
+  /** True if the primary price is metered (no quantity at checkout) */
+  isMeteredPrice?: boolean;
   /** Additional metered price IDs (e.g., Team overage component) */
   meteredPriceIds?: string[];
   successUrl: string;

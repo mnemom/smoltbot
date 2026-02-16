@@ -237,6 +237,8 @@ export async function handleCheckout(
 
   // Build checkout session params
   const isDeveloper = planId === 'plan-developer';
+  const billingModel = plan.billing_model as string;
+  const isMeteredPrice = billingModel === 'metered';
 
   // For Team plan, include metered overage component as additional line item
   const meteredPriceId = plan.stripe_metered_price_id as string | undefined;
@@ -269,6 +271,7 @@ export async function handleCheckout(
   const session = await providerInstance.createCheckoutSession({
     customerId,
     priceId,
+    isMeteredPrice,
     meteredPriceIds,
     successUrl: 'https://mnemom.ai/settings/billing?checkout=success',
     cancelUrl: 'https://mnemom.ai/settings/billing?checkout=canceled',
