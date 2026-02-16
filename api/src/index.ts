@@ -3294,60 +3294,96 @@ async function handleAdminExtendTrial(env: Env, userId: string, request: Request
   return jsonResponse({ success: true, trial_ends_at: newEnd.toISOString() });
 }
 
-async function handleAdminDeleteBilling(env: Env, userId: string, request: Request): Promise<Response> {
+async function handleAdminDeleteUser(env: Env, userId: string, request: Request): Promise<Response> {
   const adminOrError = await requireAdmin(request, env);
   if (adminOrError instanceof Response) return adminOrError;
   const admin = adminOrError as JWTPayload;
 
-  // Look up the billing account
-  const { data: account, error: accError } = await supabaseQuery(env, 'billing_accounts', {
+  const deleted: string[] = [];
+
+  // 1. Cancel Stripe subscription + delete billing records
+  const { data: account } = await supabaseQuery(env, 'billing_accounts', {
     eq: ['user_id', userId],
     single: true,
   });
-  if (accError) return errorResponse(`User billing account not found: ${accError}`, 404);
 
-  const acc = account as Record<string, unknown>;
-  const accountId = acc.account_id as string;
+  if (account) {
+    const acc = account as Record<string, unknown>;
+    const accountId = acc.account_id as string;
 
-  // Cancel Stripe subscription if active
-  const subscriptionId = acc.stripe_subscription_id as string | null;
-  if (subscriptionId) {
-    try {
-      const { cancelStripeSubscriptionForAccount } = await import('./billing/handlers');
-      await cancelStripeSubscriptionForAccount(env as unknown as BillingEnv, userId);
-    } catch (err) {
-      console.warn(`[admin] Failed to cancel Stripe subscription for ${userId}:`, err);
-    }
-  }
-
-  // Delete related records in order (foreign key safe)
-  await supabaseDelete(env, 'billing_events', { account_id: accountId });
-  await supabaseDelete(env, 'mnemom_api_keys', { account_id: accountId });
-  await supabaseDelete(env, 'usage_daily_rollup', { account_id: accountId });
-  await supabaseDelete(env, 'email_log', { recipient: acc.billing_email as string });
-  await supabaseDelete(env, 'billing_accounts', { account_id: accountId });
-
-  // Purge KV cache
-  if (env.BILLING_CACHE) {
-    try {
-      const agentsRes = await fetch(
-        `${env.SUPABASE_URL}/rest/v1/agents?billing_account_id=eq.${accountId}&select=id`,
-        { headers: { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPABASE_KEY}` } },
-      );
-      if (agentsRes.ok) {
-        const agents = (await agentsRes.json()) as Array<{ id: string }>;
-        for (const agent of agents) {
-          await (env.BILLING_CACHE as KVNamespace).delete(`quota:agent:${agent.id}`).catch(() => {});
-        }
+    // Cancel Stripe subscription if active
+    if (acc.stripe_subscription_id) {
+      try {
+        const { cancelStripeSubscriptionForAccount } = await import('./billing/handlers');
+        await cancelStripeSubscriptionForAccount(env as unknown as BillingEnv, userId);
+        deleted.push('stripe_subscription');
+      } catch (err) {
+        console.warn(`[admin] Failed to cancel Stripe subscription for ${userId}:`, err);
       }
-    } catch {
-      // Best-effort cache purge
+    }
+
+    // Delete billing-related records
+    await supabaseDelete(env, 'billing_events', { account_id: accountId });
+    await supabaseDelete(env, 'mnemom_api_keys', { account_id: accountId });
+    await supabaseDelete(env, 'usage_daily_rollup', { account_id: accountId });
+    if (acc.billing_email) {
+      await supabaseDelete(env, 'email_log', { recipient: acc.billing_email as string });
+    }
+    await supabaseDelete(env, 'stripe_webhook_events', { event_id: '' }); // skip if no filter — handled below
+    await supabaseDelete(env, 'billing_accounts', { account_id: accountId });
+    deleted.push('billing_account', 'billing_events', 'api_keys', 'usage_rollups');
+
+    // Purge KV cache
+    if (env.BILLING_CACHE) {
+      try {
+        const agentsRes = await fetch(
+          `${env.SUPABASE_URL}/rest/v1/agents?user_id=eq.${userId}&select=id`,
+          { headers: { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPABASE_KEY}` } },
+        );
+        if (agentsRes.ok) {
+          const agents = (await agentsRes.json()) as Array<{ id: string }>;
+          for (const a of agents) {
+            await (env.BILLING_CACHE as KVNamespace).delete(`quota:agent:${a.id}`).catch(() => {});
+          }
+        }
+      } catch {
+        // Best-effort cache purge
+      }
     }
   }
 
-  console.log(`[admin] Billing records deleted for user ${userId} by admin ${admin.sub}`);
+  // 2. Unlink agents (don't delete — agents have independent trace history)
+  const { error: unlinkError } = await supabaseUpdate(
+    env,
+    'agents',
+    { user_id: userId },
+    { user_id: null, email: null, billing_account_id: null },
+  );
+  if (!unlinkError) deleted.push('agent_links');
 
-  return jsonResponse({ success: true, deleted_account_id: accountId });
+  // 3. Delete Supabase auth user (frees the email for re-registration)
+  const deleteRes = await fetch(
+    `${env.SUPABASE_URL}/auth/v1/admin/users/${userId}`,
+    {
+      method: 'DELETE',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+      },
+    },
+  );
+
+  if (deleteRes.ok) {
+    deleted.push('auth_user');
+  } else {
+    const body = await deleteRes.text();
+    console.error(`[admin] Failed to delete auth user ${userId}: ${body}`);
+    return errorResponse(`Failed to delete auth user: ${body}`, 500);
+  }
+
+  console.log(`[admin] User ${userId} fully deleted by admin ${admin.sub}. Cleaned: ${deleted.join(', ')}`);
+
+  return jsonResponse({ success: true, user_id: userId, deleted });
 }
 
 // ============================================
@@ -3802,9 +3838,9 @@ export default {
         return handleAdminExtendTrial(env, adminUserBillingTrialMatch[1], request);
       }
 
-      const adminUserBillingDeleteMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing$/);
-      if (adminUserBillingDeleteMatch && method === 'DELETE') {
-        return handleAdminDeleteBilling(env, adminUserBillingDeleteMatch[1], request);
+      const adminUserDeleteMatch = path.match(/^\/v1\/admin\/users\/([^/]+)$/);
+      if (adminUserDeleteMatch && method === 'DELETE') {
+        return handleAdminDeleteUser(env, adminUserDeleteMatch[1], request);
       }
 
       // 404 for unmatched routes
