@@ -71,6 +71,7 @@ export interface Env {
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   RESEND_API_KEY: string;
+  BILLING_CACHE?: KVNamespace;
 }
 
 // CORS headers for all responses
@@ -3293,6 +3294,62 @@ async function handleAdminExtendTrial(env: Env, userId: string, request: Request
   return jsonResponse({ success: true, trial_ends_at: newEnd.toISOString() });
 }
 
+async function handleAdminDeleteBilling(env: Env, userId: string, request: Request): Promise<Response> {
+  const adminOrError = await requireAdmin(request, env);
+  if (adminOrError instanceof Response) return adminOrError;
+  const admin = adminOrError as JWTPayload;
+
+  // Look up the billing account
+  const { data: account, error: accError } = await supabaseQuery(env, 'billing_accounts', {
+    eq: ['user_id', userId],
+    single: true,
+  });
+  if (accError) return errorResponse(`User billing account not found: ${accError}`, 404);
+
+  const acc = account as Record<string, unknown>;
+  const accountId = acc.account_id as string;
+
+  // Cancel Stripe subscription if active
+  const subscriptionId = acc.stripe_subscription_id as string | null;
+  if (subscriptionId) {
+    try {
+      const { cancelStripeSubscriptionForAccount } = await import('./billing/handlers');
+      await cancelStripeSubscriptionForAccount(env as unknown as BillingEnv, userId);
+    } catch (err) {
+      console.warn(`[admin] Failed to cancel Stripe subscription for ${userId}:`, err);
+    }
+  }
+
+  // Delete related records in order (foreign key safe)
+  await supabaseDelete(env, 'billing_events', { account_id: accountId });
+  await supabaseDelete(env, 'mnemom_api_keys', { account_id: accountId });
+  await supabaseDelete(env, 'usage_daily_rollup', { account_id: accountId });
+  await supabaseDelete(env, 'email_log', { recipient: acc.billing_email as string });
+  await supabaseDelete(env, 'billing_accounts', { account_id: accountId });
+
+  // Purge KV cache
+  if (env.BILLING_CACHE) {
+    try {
+      const agentsRes = await fetch(
+        `${env.SUPABASE_URL}/rest/v1/agents?billing_account_id=eq.${accountId}&select=id`,
+        { headers: { apikey: env.SUPABASE_KEY, Authorization: `Bearer ${env.SUPABASE_KEY}` } },
+      );
+      if (agentsRes.ok) {
+        const agents = (await agentsRes.json()) as Array<{ id: string }>;
+        for (const agent of agents) {
+          await (env.BILLING_CACHE as KVNamespace).delete(`quota:agent:${agent.id}`).catch(() => {});
+        }
+      }
+    } catch {
+      // Best-effort cache purge
+    }
+  }
+
+  console.log(`[admin] Billing records deleted for user ${userId} by admin ${admin.sub}`);
+
+  return jsonResponse({ success: true, deleted_account_id: accountId });
+}
+
 // ============================================
 // USER + PUBLIC BILLING HANDLERS
 // ============================================
@@ -3743,6 +3800,11 @@ export default {
       const adminUserBillingTrialMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing\/trial$/);
       if (adminUserBillingTrialMatch && method === 'POST') {
         return handleAdminExtendTrial(env, adminUserBillingTrialMatch[1], request);
+      }
+
+      const adminUserBillingDeleteMatch = path.match(/^\/v1\/admin\/users\/([^/]+)\/billing$/);
+      if (adminUserBillingDeleteMatch && method === 'DELETE') {
+        return handleAdminDeleteBilling(env, adminUserBillingDeleteMatch[1], request);
       }
 
       // 404 for unmatched routes
