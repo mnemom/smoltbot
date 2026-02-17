@@ -14,6 +14,14 @@ workers_dev = true
 # STRIPE_SECRET_KEY      (Stripe API secret key)
 # STRIPE_WEBHOOK_SECRET  (Stripe webhook signing secret)
 # RESEND_API_KEY         (Resend email API key)
+# ANTHROPIC_API_KEY      (Anthropic API key for analysis LLM)
+# LICENSE_SIGNING_SECRET (HMAC secret for license JWT signing)
+
+# Billing/rate-limit cache — create with: wrangler kv:namespace create BILLING_CACHE
+# Then fill in the id below.
+# [[kv_namespaces]]
+# binding = "BILLING_CACHE"
+# id = "YOUR_KV_NAMESPACE_ID"
 
 [triggers]
 crons = ["0 */6 * * *"]

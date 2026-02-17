@@ -13,6 +13,7 @@ export interface Config {
   openclawConfigured?: boolean;
   providers?: string[];  // e.g. ['anthropic', 'openai'] — standalone mode
   mnemomApiKey?: string; // mnm_ key for gateway billing identity
+  licenseJwt?: string;   // Enterprise license JWT
   configuredAt?: string;
 }
 

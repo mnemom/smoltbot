@@ -102,6 +102,19 @@ import {
   handleAdminDeactivateCoupon,
   handleAdminApplyCoupon,
 } from './admin/handlers';
+import {
+  handleAdminCreateLicense,
+  handleAdminListLicenses,
+  handleAdminLicenseDetail,
+  handleAdminUpdateLicense,
+  handleAdminRevokeLicense,
+  handleAdminReissueLicense,
+  handleLicenseValidate,
+} from './licensing/handlers';
+import {
+  handleAnalyze,
+  handleAnalyzeBatch,
+} from './analyze/handlers';
 
 export interface Env {
   SUPABASE_URL: string;
@@ -111,6 +124,8 @@ export interface Env {
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   RESEND_API_KEY: string;
+  ANTHROPIC_API_KEY: string;
+  LICENSE_SIGNING_SECRET: string;
   BILLING_CACHE?: KVNamespace;
 }
 
@@ -118,7 +133,7 @@ export interface Env {
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Mnemom-Api-Key, X-AIP-Version',
 };
 
 // Helper to create JSON response with CORS
@@ -4115,6 +4130,63 @@ export default {
         return handleAdminDeactivateCoupon(env as unknown as BillingEnv, request, requireAdmin as any, adminCouponDeleteMatch[1]);
       }
 
+      // ============================================
+      // PHASE 7: LICENSING ROUTES
+      // ============================================
+
+      // POST /v1/license/validate (public — license JWT is the credential)
+      if (path === '/v1/license/validate' && method === 'POST') {
+        return handleLicenseValidate(env as unknown as BillingEnv, request);
+      }
+
+      // POST /v1/admin/licenses
+      if (path === '/v1/admin/licenses' && method === 'POST') {
+        return handleAdminCreateLicense(env as unknown as BillingEnv, request, requireAdmin as any);
+      }
+
+      // GET /v1/admin/licenses
+      if (path === '/v1/admin/licenses' && method === 'GET') {
+        return handleAdminListLicenses(env as unknown as BillingEnv, request, requireAdmin as any, url);
+      }
+
+      // GET /v1/admin/licenses/:licenseId
+      const adminLicenseDetailMatch = path.match(/^\/v1\/admin\/licenses\/([^/]+)$/);
+      if (adminLicenseDetailMatch && method === 'GET') {
+        return handleAdminLicenseDetail(env as unknown as BillingEnv, request, requireAdmin as any, adminLicenseDetailMatch[1]);
+      }
+
+      // PATCH /v1/admin/licenses/:licenseId
+      const adminLicenseUpdateMatch = path.match(/^\/v1\/admin\/licenses\/([^/]+)$/);
+      if (adminLicenseUpdateMatch && method === 'PATCH') {
+        return handleAdminUpdateLicense(env as unknown as BillingEnv, request, requireAdmin as any, adminLicenseUpdateMatch[1]);
+      }
+
+      // DELETE /v1/admin/licenses/:licenseId
+      const adminLicenseRevokeMatch = path.match(/^\/v1\/admin\/licenses\/([^/]+)$/);
+      if (adminLicenseRevokeMatch && method === 'DELETE') {
+        return handleAdminRevokeLicense(env as unknown as BillingEnv, request, requireAdmin as any, adminLicenseRevokeMatch[1]);
+      }
+
+      // POST /v1/admin/licenses/:licenseId/reissue
+      const adminLicenseReissueMatch = path.match(/^\/v1\/admin\/licenses\/([^/]+)\/reissue$/);
+      if (adminLicenseReissueMatch && method === 'POST') {
+        return handleAdminReissueLicense(env as unknown as BillingEnv, request, requireAdmin as any, adminLicenseReissueMatch[1]);
+      }
+
+      // ============================================
+      // PHASE 7: HYBRID ANALYSIS ROUTES
+      // ============================================
+
+      // POST /v1/analyze
+      if (path === '/v1/analyze' && method === 'POST') {
+        return handleAnalyze(env as unknown as BillingEnv, request);
+      }
+
+      // POST /v1/analyze/batch
+      if (path === '/v1/analyze/batch' && method === 'POST') {
+        return handleAnalyzeBatch(env as unknown as BillingEnv, request);
+      }
+
       // 404 for unmatched routes
       return errorResponse('Not found', 404);
 
@@ -4129,6 +4201,8 @@ export default {
 
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     const { checkUsageAlerts } = await import('./billing/usage-alerts');
+    const { checkLicenseExpiry } = await import('./licensing/expiry-check');
     await checkUsageAlerts(env as unknown as BillingEnv);
+    await checkLicenseExpiry(env as unknown as BillingEnv);
   },
 };

@@ -608,3 +608,164 @@ Your role in ${data.orgName} has been changed from ${data.oldRole} to ${data.new
 This change is effective immediately. If you have any questions, please contact your organization administrator.`,
   };
 }
+
+// ============================================
+// Phase 7: License Email Templates
+// ============================================
+
+export function licenseCreatedEmail(data: { companyName: string; licenseId: string; expiresAt: string; features: string[] }): EmailTemplate {
+  const featureList = data.features.map((f) => `<li style="margin:0 0 4px 0;">${f}</li>`).join('');
+  return {
+    subject: 'Your Mnemom Enterprise license is ready',
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Your Enterprise license is ready</h1>
+      <p style="margin:0 0 12px 0;">A new Mnemom Enterprise license has been created for <strong>${data.companyName}</strong>.</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#F9F8F3;border-radius:8px;border:1px solid #E5E7EB;">
+        <tr>
+          <td style="padding:16px 20px;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#6B7280;font-weight:600;">License ID</p>
+            <p style="margin:0 0 12px 0;font-family:monospace;color:#0F172A;">${data.licenseId}</p>
+            <p style="margin:0 0 4px 0;font-size:13px;color:#6B7280;font-weight:600;">Expires</p>
+            <p style="margin:0;color:#0F172A;">${data.expiresAt}</p>
+          </td>
+        </tr>
+      </table>
+      ${data.features.length > 0 ? `<p style="margin:0 0 8px 0;font-weight:600;">Enabled features:</p><ul style="margin:0 0 16px 0;padding-left:20px;">${featureList}</ul>` : ''}
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="https://docs.mnemom.ai/enterprise/setup" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Setup Guide</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#888;">The license JWT was included in the API response. It will not be sent via email for security.</p>
+    `),
+    text: `Your Enterprise license is ready
+
+A new Mnemom Enterprise license has been created for ${data.companyName}.
+
+License ID: ${data.licenseId}
+Expires: ${data.expiresAt}
+${data.features.length > 0 ? `\nEnabled features:\n${data.features.map((f) => `- ${f}`).join('\n')}` : ''}
+
+Setup guide: https://docs.mnemom.ai/enterprise/setup
+
+The license JWT was included in the API response. It will not be sent via email for security.`,
+  };
+}
+
+export function licenseExpiringEmail(data: { companyName: string; licenseId: string; expiresAt: string; daysRemaining: number }): EmailTemplate {
+  return {
+    subject: `Your Mnemom license expires in ${data.daysRemaining} days`,
+    html: emailLayout(`
+      <div style="background:#D97706;padding:16px 24px;border-radius:8px 8px 0 0;margin:-24px -32px 24px -32px;">
+        <h1 style="margin:0;font-size:22px;color:#ffffff;">License Expiring Soon</h1>
+      </div>
+      <p style="margin:0 0 12px 0;">Your Mnemom Enterprise license for <strong>${data.companyName}</strong> expires in <strong>${data.daysRemaining} days</strong>.</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#F9F8F3;border-radius:8px;border:1px solid #E5E7EB;">
+        <tr>
+          <td style="padding:16px 20px;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#6B7280;font-weight:600;">License ID</p>
+            <p style="margin:0 0 12px 0;font-family:monospace;color:#0F172A;">${data.licenseId}</p>
+            <p style="margin:0 0 4px 0;font-size:13px;color:#6B7280;font-weight:600;">Expiry Date</p>
+            <p style="margin:0;color:#0F172A;">${data.expiresAt}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 20px 0;">Please contact your account manager to renew your license before it expires.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="mailto:enterprise@mnemom.ai" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Contact for Renewal</a>
+          </td>
+        </tr>
+      </table>
+    `),
+    text: `License Expiring Soon
+
+Your Mnemom Enterprise license for ${data.companyName} expires in ${data.daysRemaining} days.
+
+License ID: ${data.licenseId}
+Expiry Date: ${data.expiresAt}
+
+Please contact your account manager to renew your license before it expires.
+
+Contact: enterprise@mnemom.ai`,
+  };
+}
+
+export function licenseExpiredEmail(data: { companyName: string; licenseId: string }): EmailTemplate {
+  return {
+    subject: 'Your Mnemom Enterprise license has expired',
+    html: emailLayout(`
+      <div style="background:#dc2626;padding:16px 24px;border-radius:8px 8px 0 0;margin:-24px -32px 24px -32px;">
+        <h1 style="margin:0;font-size:22px;color:#ffffff;">License Expired</h1>
+      </div>
+      <p style="margin:0 0 12px 0;">Your Mnemom Enterprise license for <strong>${data.companyName}</strong> has expired.</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#FEF2F2;border-radius:8px;border:1px solid #FECACA;">
+        <tr>
+          <td style="padding:16px 20px;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#991B1B;font-weight:600;">License ID</p>
+            <p style="margin:0;font-family:monospace;color:#991B1B;">${data.licenseId}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px 0;">Your self-hosted gateway will continue to operate in a 7-day grace period. After this period, integrity checking will be disabled until the license is renewed.</p>
+      <p style="margin:0 0 20px 0;">Please contact us to renew your license immediately.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="mailto:enterprise@mnemom.ai" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Renew License</a>
+          </td>
+        </tr>
+      </table>
+    `),
+    text: `License Expired
+
+Your Mnemom Enterprise license for ${data.companyName} has expired.
+
+License ID: ${data.licenseId}
+
+Your self-hosted gateway will continue to operate in a 7-day grace period. After this period, integrity checking will be disabled until the license is renewed.
+
+Please contact us to renew your license immediately: enterprise@mnemom.ai`,
+  };
+}
+
+export function licenseRevokedEmail(data: { companyName: string; licenseId: string; reason: string }): EmailTemplate {
+  return {
+    subject: 'Your Mnemom Enterprise license has been revoked',
+    html: emailLayout(`
+      <div style="background:#dc2626;padding:16px 24px;border-radius:8px 8px 0 0;margin:-24px -32px 24px -32px;">
+        <h1 style="margin:0;font-size:22px;color:#ffffff;">License Revoked</h1>
+      </div>
+      <p style="margin:0 0 12px 0;">Your Mnemom Enterprise license for <strong>${data.companyName}</strong> has been revoked.</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#FEF2F2;border-radius:8px;border:1px solid #FECACA;">
+        <tr>
+          <td style="padding:16px 20px;">
+            <p style="margin:0 0 4px 0;font-size:13px;color:#991B1B;font-weight:600;">Reason</p>
+            <p style="margin:0;color:#991B1B;">${data.reason}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 12px 0;">Self-hosted gateways using this license will no longer be able to validate. Your data remains intact.</p>
+      <p style="margin:0 0 20px 0;">If you believe this is an error, please contact our support team.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="mailto:support@mnemom.ai" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Contact Support</a>
+          </td>
+        </tr>
+      </table>
+    `),
+    text: `License Revoked
+
+Your Mnemom Enterprise license for ${data.companyName} has been revoked.
+
+Reason: ${data.reason}
+
+Self-hosted gateways using this license will no longer be able to validate. Your data remains intact.
+
+If you believe this is an error, please contact support: support@mnemom.ai`,
+  };
+}

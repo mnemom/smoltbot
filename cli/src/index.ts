@@ -6,6 +6,7 @@ import { statusCommand } from "./commands/status.js";
 import { integrityCommand } from "./commands/integrity.js";
 import { logsCommand } from "./commands/logs.js";
 import { claimCommand } from "./commands/claim.js";
+import { licenseActivateCommand, licenseStatusCommand, licenseDeactivateCommand } from "./commands/license.js";
 
 program
   .name("smoltbot")
@@ -77,6 +78,46 @@ program
   .action(async () => {
     try {
       await claimCommand();
+    } catch (error) {
+      console.error("Error:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+const license = program
+  .command("license")
+  .description("Enterprise license management");
+
+license
+  .command("activate <jwt>")
+  .description("Activate an enterprise license")
+  .action(async (jwt: string) => {
+    try {
+      await licenseActivateCommand(jwt);
+    } catch (error) {
+      console.error("Error:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+license
+  .command("status")
+  .description("Show license status and details")
+  .action(async () => {
+    try {
+      await licenseStatusCommand();
+    } catch (error) {
+      console.error("Error:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+license
+  .command("deactivate")
+  .description("Deactivate and remove the enterprise license")
+  .action(async () => {
+    try {
+      await licenseDeactivateCommand();
     } catch (error) {
       console.error("Error:", error instanceof Error ? error.message : error);
       process.exit(1);
