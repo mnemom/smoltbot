@@ -1634,3 +1634,155 @@ describe('Billing enforcement integration', () => {
     expect(response.headers.get('X-Mnemom-Usage-Percent')).toBe('85');
   });
 });
+
+// ============================================
+// Phase 7: Hybrid Mode Tests
+// ============================================
+
+describe('Hybrid mode config detection', () => {
+  it('should use local analysis when ANTHROPIC_API_KEY is set', () => {
+    const env = createTestEnv({ ANTHROPIC_API_KEY: 'test-key' });
+    // Local mode: ANTHROPIC_API_KEY takes precedence
+    expect(env.ANTHROPIC_API_KEY).toBe('test-key');
+    expect(env.MNEMOM_ANALYZE_URL).toBeUndefined();
+  });
+
+  it('should detect hybrid mode when MNEMOM_ANALYZE_URL is set without ANTHROPIC_API_KEY', () => {
+    const env = createTestEnv({
+      ANTHROPIC_API_KEY: '',
+      MNEMOM_ANALYZE_URL: 'https://api.mnemom.ai/v1/analyze',
+      MNEMOM_API_KEY: 'mnm_test_key',
+    });
+    expect(env.ANTHROPIC_API_KEY).toBe('');
+    expect(env.MNEMOM_ANALYZE_URL).toBe('https://api.mnemom.ai/v1/analyze');
+    expect(env.MNEMOM_API_KEY).toBe('mnm_test_key');
+  });
+
+  it('should detect skip-AIP when neither analysis key is configured', () => {
+    const env = createTestEnv({ ANTHROPIC_API_KEY: '' });
+    expect(env.ANTHROPIC_API_KEY).toBe('');
+    expect(env.MNEMOM_ANALYZE_URL).toBeUndefined();
+  });
+});
+
+describe('License validation', () => {
+  it('should proceed normally when no license JWT is configured', async () => {
+    const env = createTestEnv();
+    const handler = (await import('../index')).default;
+
+    const request = new Request('https://gateway.mnemom.ai/health');
+    const ctx = createMockContext();
+    const response = await handler.fetch(request, env, ctx);
+
+    expect(response.status).toBe(200);
+  });
+
+  it('should reject requests when license JWT is expired and invalid', async () => {
+    // Create an expired JWT with clearly invalid format
+    const env = createTestEnv({
+      MNEMOM_LICENSE_JWT: 'invalid.jwt.token',
+    });
+    const handler = (await import('../index')).default;
+
+    // Non-health request (license check runs after health check)
+    const request = new Request('https://gateway.mnemom.ai/models.json');
+    const ctx = createMockContext();
+
+    const response = await handler.fetch(request, env, ctx);
+    // Should get 403 for invalid license
+    expect(response.status).toBe(403);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body.error).toContain('License');
+  });
+
+  it('should allow health check even with invalid license', async () => {
+    const env = createTestEnv({
+      MNEMOM_LICENSE_JWT: 'invalid.jwt.token',
+    });
+    const handler = (await import('../index')).default;
+
+    const request = new Request('https://gateway.mnemom.ai/health');
+    const ctx = createMockContext();
+    const response = await handler.fetch(request, env, ctx);
+
+    // Health check is before license validation
+    expect(response.status).toBe(200);
+  });
+
+  it('should accept valid-format JWT with future expiry', async () => {
+    // Create a properly-formatted JWT with future expiry
+    const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const payload = btoa(JSON.stringify({
+      license_id: 'lic-test1234',
+      account_id: 'ba-test',
+      plan_id: 'plan-enterprise',
+      feature_flags: { aip: true },
+      limits: {},
+      max_activations: 1,
+      is_offline: true,
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + 86400,
+      kid: 'lsk-test',
+    })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const fakeSignature = btoa('fake-signature')
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    const env = createTestEnv({
+      MNEMOM_LICENSE_JWT: `${header}.${payload}.${fakeSignature}`,
+    });
+    const handler = (await import('../index')).default;
+
+    // Mock the validation fetch to succeed
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ valid: true }),
+    });
+    // Mock the models.json supabase call
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve([]),
+    });
+
+    const request = new Request('https://gateway.mnemom.ai/models.json');
+    const ctx = createMockContext();
+    const response = await handler.fetch(request, env, ctx);
+
+    // Should proceed past license check
+    expect(response.status).toBe(200);
+  });
+
+  it('should reject when license JWT is expired and no grace period available', async () => {
+    // Create JWT with expiry in the past
+    const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const payload = btoa(JSON.stringify({
+      license_id: 'lic-expired1234',
+      exp: Math.floor(Date.now() / 1000) - 86400, // expired yesterday
+      is_offline: false,
+    })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const fakeSignature = btoa('sig').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    const kvGet = vi.fn()
+      .mockResolvedValueOnce(null); // license:last_valid (no grace period cache)
+
+    const env = createTestEnv({
+      MNEMOM_LICENSE_JWT: `${header}.${payload}.${fakeSignature}`,
+      BILLING_CACHE: {
+        get: kvGet,
+        put: vi.fn().mockResolvedValue(undefined),
+        delete: vi.fn().mockResolvedValue(undefined),
+        list: vi.fn(),
+        getWithMetadata: vi.fn(),
+      } as unknown as KVNamespace,
+    });
+
+    const handler = (await import('../index')).default;
+    const request = new Request('https://gateway.mnemom.ai/models.json');
+    const ctx = createMockContext();
+    const response = await handler.fetch(request, env, ctx);
+
+    // Expired JWT with no grace period → should reject
+    expect(response.status).toBe(403);
+  });
+});

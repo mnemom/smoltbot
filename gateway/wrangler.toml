@@ -26,3 +26,8 @@ id = "d13bd450c5ab4a2c9766f2dc26ce513c"
 # CF_AI_GATEWAY_URL
 # OTLP_ENDPOINT  (Grafana Cloud / OTel collector)
 # OTLP_AUTH       (e.g. "Basic <base64>")
+
+# Phase 7: Self-hosted deployment (optional, only set for self-hosted gateways)
+# MNEMOM_ANALYZE_URL  (e.g. "https://api.mnemom.ai/v1/analyze")
+# MNEMOM_API_KEY      (mnm_ key with analyze scope)
+# MNEMOM_LICENSE_JWT  (Enterprise license JWT)

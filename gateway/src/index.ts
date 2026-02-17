@@ -53,6 +53,10 @@ export interface Env {
   GEMINI_API_KEY?: string;
   BILLING_CACHE?: KVNamespace;          // Optional — fail-open if not bound
   BILLING_ENFORCEMENT_ENABLED?: string; // "true"/"false", default "false"
+  // Phase 7: Self-hosted hybrid mode
+  MNEMOM_ANALYZE_URL?: string;          // e.g. "https://api.mnemom.ai/v1/analyze"
+  MNEMOM_API_KEY?: string;              // mnm_xxx key with analyze scope
+  MNEMOM_LICENSE_JWT?: string;          // Enterprise license JWT
 }
 
 interface Agent {
@@ -1694,6 +1698,112 @@ export async function handleProviderProxy(
         });
       }
 
+      // Phase 7: Hybrid mode — call hosted /v1/analyze if no local ANTHROPIC_API_KEY
+      if (!env.ANTHROPIC_API_KEY && env.MNEMOM_ANALYZE_URL && env.MNEMOM_API_KEY) {
+        try {
+          const hybridController = new AbortController();
+          const hybridTimeout = setTimeout(() => hybridController.abort(), 10000);
+          const hybridResponse = await fetch(env.MNEMOM_ANALYZE_URL, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Mnemom-Api-Key': env.MNEMOM_API_KEY,
+            },
+            body: JSON.stringify({
+              thinking_block: thinking.content,
+              thinking_metadata: { provider: thinking.provider, model: thinking.model },
+              agent_id: agent.id,
+              session_id: sessionId,
+              card: aipCard,
+              conscience_values: conscienceValues || [...DEFAULT_CONSCIENCE_VALUES],
+              task_context: (() => {
+                const desc = card?.extensions?.mnemom?.description || card?.extensions?.mnemom?.role || '';
+                return desc ? desc.toString().slice(0, 200) : undefined;
+              })(),
+              window_context: window.getState().checkpoints.map((cp: IntegrityCheckpoint) => ({
+                checkpoint_id: cp.checkpoint_id,
+                verdict: cp.verdict,
+                reasoning_summary: cp.reasoning_summary,
+              })),
+              store_checkpoint: true,
+            }),
+            signal: hybridController.signal,
+          });
+          clearTimeout(hybridTimeout);
+
+          if (hybridResponse.ok) {
+            const hybridResult = (await hybridResponse.json()) as Record<string, unknown>;
+            const hybridCheckpoint = hybridResult.checkpoint as IntegrityCheckpoint;
+            const hybridProceed = hybridResult.proceed as boolean;
+            const hybridAction = hybridResult.recommended_action as string;
+
+            responseHeaders.set('X-AIP-Verdict', hybridCheckpoint.verdict);
+            responseHeaders.set('X-AIP-Checkpoint-Id', hybridCheckpoint.checkpoint_id);
+            responseHeaders.set('X-AIP-Action', hybridAction);
+            responseHeaders.set('X-AIP-Proceed', String(hybridProceed));
+            responseHeaders.set('X-AIP-Source', 'hybrid');
+
+            if (enforcementMode === 'enforce' && hybridCheckpoint.verdict === 'boundary_violation') {
+              return new Response(
+                JSON.stringify({
+                  error: 'Request blocked by integrity check',
+                  type: 'integrity_violation',
+                  checkpoint: {
+                    checkpoint_id: hybridCheckpoint.checkpoint_id,
+                    verdict: hybridCheckpoint.verdict,
+                    concerns: hybridCheckpoint.concerns,
+                    reasoning_summary: hybridCheckpoint.reasoning_summary,
+                    recommended_action: hybridAction,
+                  },
+                }),
+                {
+                  status: 403,
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'X-AIP-Verdict': hybridCheckpoint.verdict,
+                    'X-AIP-Checkpoint-Id': hybridCheckpoint.checkpoint_id,
+                    'X-AIP-Action': hybridAction,
+                    'X-AIP-Proceed': String(hybridProceed),
+                    'x-smoltbot-agent': agent.id,
+                    'x-smoltbot-session': sessionId,
+                  },
+                }
+              );
+            }
+
+            return new Response(responseBodyText, {
+              status: response.status,
+              statusText: response.statusText,
+              headers: responseHeaders,
+            });
+          }
+          // Non-OK: fall through to fail-open
+          console.error(`[gateway/hybrid] Analyze API returned ${hybridResponse.status}`);
+        } catch (hybridErr) {
+          console.error('[gateway/hybrid] Hybrid analyze failed (fail-open):', hybridErr);
+        }
+
+        // Fail-open for hybrid mode
+        responseHeaders.set('X-AIP-Verdict', 'error');
+        responseHeaders.set('X-AIP-Source', 'hybrid');
+        return new Response(responseBodyText, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeaders,
+        });
+      }
+
+      // Skip AIP if no analysis capability configured
+      if (!env.ANTHROPIC_API_KEY) {
+        responseHeaders.set('X-AIP-Verdict', 'skipped');
+        responseHeaders.set('X-AIP-Reason', 'no-analysis-configured');
+        return new Response(responseBodyText, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeaders,
+        });
+      }
+
       // Build conscience prompt
       const values: ConscienceValue[] = conscienceValues || [...DEFAULT_CONSCIENCE_VALUES];
       // Build task context from request messages and card description (PII-safe)
@@ -1888,6 +1998,114 @@ export async function handleAnthropicProxy(
 }
 
 // ============================================================================
+// Phase 7: License Validation (Self-Hosted)
+// ============================================================================
+
+/**
+ * Validate enterprise license JWT for self-hosted gateways.
+ * Caches validation in KV with 24h TTL. 7-day grace period on failure.
+ */
+async function validateLicense(env: Env): Promise<{ valid: boolean; warning?: string }> {
+  if (!env.MNEMOM_LICENSE_JWT) return { valid: true }; // Not a licensed deployment
+
+  const cache = env.BILLING_CACHE;
+
+  // Decode JWT locally (no verification — server validates signature)
+  const parts = env.MNEMOM_LICENSE_JWT.split('.');
+  if (parts.length !== 3) return { valid: false };
+
+  let claims: Record<string, unknown>;
+  try {
+    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padding = padded.length % 4 === 0 ? '' : '='.repeat(4 - (padded.length % 4));
+    claims = JSON.parse(atob(padded + padding));
+  } catch {
+    return { valid: false };
+  }
+
+  const licenseId = claims.license_id as string;
+  if (!licenseId) return { valid: false };
+
+  // Check exp claim locally (works offline)
+  const now = Math.floor(Date.now() / 1000);
+  if (claims.exp && (claims.exp as number) < now) {
+    // Check grace period
+    if (cache) {
+      const lastValid = await cache.get(`license:last_valid:${licenseId}`).catch(() => null);
+      if (lastValid) {
+        const lastValidDate = new Date(lastValid);
+        const daysSince = (Date.now() - lastValidDate.getTime()) / 86400000;
+        if (daysSince < 7) {
+          return { valid: true, warning: 'license_expired_grace_period' };
+        }
+      }
+    }
+    return { valid: false };
+  }
+
+  // Check cached validation
+  if (cache) {
+    const cached = await cache.get(`license:status:${licenseId}`).catch(() => null);
+    if (cached === 'valid') return { valid: true };
+    if (cached === 'invalid') {
+      // Check grace period
+      const lastValid = await cache.get(`license:last_valid:${licenseId}`).catch(() => null);
+      if (lastValid) {
+        const daysSince = (Date.now() - new Date(lastValid).getTime()) / 86400000;
+        if (daysSince < 7) return { valid: true, warning: 'license_validation_failed_grace' };
+      }
+      return { valid: false };
+    }
+  }
+
+  // Phone-home validation (best effort)
+  try {
+    const validateUrl = env.MNEMOM_ANALYZE_URL
+      ? env.MNEMOM_ANALYZE_URL.replace('/v1/analyze', '/v1/license/validate')
+      : 'https://api.mnemom.ai/v1/license/validate';
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(validateUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        license: env.MNEMOM_LICENSE_JWT,
+        instance_id: env.GATEWAY_VERSION || 'unknown',
+        instance_metadata: { gateway_version: env.GATEWAY_VERSION },
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (resp.ok) {
+      if (cache) {
+        await cache.put(`license:status:${licenseId}`, 'valid', { expirationTtl: 86400 }).catch(() => {});
+        await cache.put(`license:last_valid:${licenseId}`, new Date().toISOString(), { expirationTtl: 604800 }).catch(() => {});
+      }
+      return { valid: true };
+    }
+
+    if (cache) {
+      await cache.put(`license:status:${licenseId}`, 'invalid', { expirationTtl: 3600 }).catch(() => {});
+    }
+  } catch {
+    // Network failure — check grace period
+    if (cache) {
+      const lastValid = await cache.get(`license:last_valid:${licenseId}`).catch(() => null);
+      if (lastValid) {
+        const daysSince = (Date.now() - new Date(lastValid).getTime()) / 86400000;
+        if (daysSince < 7) return { valid: true, warning: 'license_validation_unreachable_grace' };
+      }
+    }
+    // If offline license, trust the JWT exp
+    if (claims.is_offline) return { valid: true };
+  }
+
+  return { valid: false };
+}
+
+// ============================================================================
 // Main Request Handler
 // ============================================================================
 
@@ -1917,6 +2135,17 @@ export default {
     // Health check endpoint
     if (path === '/health' || path === '/health/') {
       return handleHealthCheck(env);
+    }
+
+    // Phase 7: License validation for self-hosted deployments
+    if (env.MNEMOM_LICENSE_JWT) {
+      const licenseResult = await validateLicense(env);
+      if (!licenseResult.valid) {
+        return new Response(
+          JSON.stringify({ error: 'License invalid or expired', type: 'license_error' }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
     }
 
     // Models endpoint
