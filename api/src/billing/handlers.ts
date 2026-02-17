@@ -934,6 +934,45 @@ ${message ? `<h3 style="margin-top: 16px;">Use Case</h3><p style="color: #333; w
       // Don't fail the request — the lead was saved
     }
 
+    // HubSpot: create/update contact + deal (best-effort)
+    try {
+      const { hubspotCreateOrUpdateContact, hubspotCreateDeal } = await import('./hubspot');
+      const nameParts = name.split(' ');
+      const contact = await hubspotCreateOrUpdateContact(env, {
+        email,
+        firstname: nameParts[0],
+        lastname: nameParts.slice(1).join(' ') || undefined,
+        company,
+        jobtitle: role || undefined,
+        lifecyclestage: 'lead',
+        company_size: companySize || undefined,
+        lead_source: 'pricing_page',
+      });
+      if (contact) {
+        await hubspotCreateDeal(env, contact.id, {
+          dealname: `Enterprise: ${company}`,
+          dealstage: 'appointmentscheduled',
+        });
+      }
+    } catch (hsErr) {
+      console.error('[enterprise] HubSpot sync failed:', hsErr);
+    }
+
+    // Slack: enterprise lead alert (best-effort)
+    try {
+      const { enterpriseLeadAlert } = await import('./slack');
+      await enterpriseLeadAlert(env, {
+        name,
+        email,
+        company,
+        companySize: companySize || undefined,
+        role: role || undefined,
+        leadId,
+      });
+    } catch (slackErr) {
+      console.error('[enterprise] Slack alert failed:', slackErr);
+    }
+
     return jsonResponse({ id: leadId });
   } catch (err) {
     console.error('[enterprise] Contact form error:', err);

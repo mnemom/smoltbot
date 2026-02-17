@@ -245,6 +245,33 @@ async function handleCheckoutCompleted(
         ? welcomeDeveloperEmail({ email })
         : welcomeTeamTrialEmail({ email });
       await sendEmail(email, template, env);
+
+      // HubSpot: create/update contact with plan + customer lifecycle (best-effort)
+      try {
+        const { hubspotCreateOrUpdateContact } = await import('./hubspot');
+        await hubspotCreateOrUpdateContact(env, {
+          email,
+          lifecyclestage: 'customer',
+          mnemom_plan: planId || undefined,
+          mnemom_account_id: accountId,
+          mnemom_signup_date: new Date().toISOString().split('T')[0],
+        });
+      } catch (err) {
+        console.error('[webhook] HubSpot sync failed on checkout:', err);
+      }
+
+      // Slack: paid signup alert (best-effort)
+      try {
+        const { highValueSignupAlert } = await import('./slack');
+        const planNames: Record<string, string> = { 'plan-developer': 'Developer', 'plan-team': 'Team', 'plan-enterprise': 'Enterprise' };
+        await highValueSignupAlert(env, {
+          email,
+          plan: planNames[planId || ''] || planId || 'unknown',
+          accountId,
+        });
+      } catch (err) {
+        console.error('[webhook] Slack alert failed on checkout:', err);
+      }
     }
   }
 }
@@ -394,6 +421,23 @@ async function handleSubscriptionUpdated(
     }
   }
 
+  // HubSpot: update contact plan on plan change (best-effort)
+  if (newPlanId) {
+    try {
+      const { hubspotCreateOrUpdateContact } = await import('./hubspot');
+      const acctForHs = account as Record<string, unknown>;
+      const hsEmail = acctForHs.billing_email as string;
+      if (hsEmail) {
+        await hubspotCreateOrUpdateContact(env, {
+          email: hsEmail,
+          mnemom_plan: newPlanId,
+        });
+      }
+    } catch (err) {
+      console.error('[webhook] HubSpot sync failed on subscription update:', err);
+    }
+  }
+
   // Notify org billing_email about subscription update
   const acctEmail = (account as Record<string, unknown>).billing_email as string;
   if (acctEmail) {
@@ -445,6 +489,18 @@ async function handleSubscriptionDeleted(
       ? trialExpiredEmail({ email })
       : subscriptionCanceledEmail({ email });
     await sendEmail(email, template, env);
+
+    // HubSpot: revert to lead lifecycle, plan=free (best-effort)
+    try {
+      const { hubspotCreateOrUpdateContact } = await import('./hubspot');
+      await hubspotCreateOrUpdateContact(env, {
+        email,
+        lifecyclestage: 'lead',
+        mnemom_plan: 'plan-free',
+      });
+    } catch (err) {
+      console.error('[webhook] HubSpot sync failed on subscription deleted:', err);
+    }
   }
 }
 
@@ -518,6 +574,16 @@ async function handleInvoicePaid(
       amountCents: amountPaid,
       invoiceUrl: hostedInvoiceUrl,
     }));
+
+    // Slack: alert for payments >= $100 (best-effort)
+    if (amountPaid >= 10000) {
+      try {
+        const { highValuePaymentAlert } = await import('./slack');
+        await highValuePaymentAlert(env, { email, accountId, amountCents: amountPaid });
+      } catch (err) {
+        console.error('[webhook] Slack alert failed on invoice paid:', err);
+      }
+    }
   }
 }
 
@@ -553,6 +619,14 @@ async function handleInvoicePaymentFailed(
   if (email) {
     await sendEmail(email, paymentFailedEmail({ email }, attemptCount), env);
     await sendToOrgBillingEmail(env, accountId, email, paymentFailedEmail({ email }, attemptCount));
+
+    // Slack: churn risk alert (best-effort)
+    try {
+      const { paymentFailedAlert: slackPaymentFailed } = await import('./slack');
+      await slackPaymentFailed(env, { email, accountId, attemptCount });
+    } catch (err) {
+      console.error('[webhook] Slack alert failed on payment failure:', err);
+    }
   }
 }
 

@@ -194,5 +194,7 @@ export interface BillingEnv {
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   RESEND_API_KEY: string;
+  HUBSPOT_API_KEY?: string;
+  SLACK_WEBHOOK_URL?: string;
   BILLING_CACHE?: KVNamespace;
 }

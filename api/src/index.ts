@@ -133,6 +133,8 @@ export interface Env {
   RESEND_API_KEY: string;
   ANTHROPIC_API_KEY: string;
   LICENSE_SIGNING_SECRET: string;
+  HUBSPOT_API_KEY?: string;
+  SLACK_WEBHOOK_URL?: string;
   BILLING_CACHE?: KVNamespace;
 }
 
