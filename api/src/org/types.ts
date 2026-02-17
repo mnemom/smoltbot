@@ -32,6 +32,8 @@ export interface OrgMember {
   invited_by?: string;
   invited_at?: string;
   accepted_at?: string;
+  auth_method?: 'password' | 'sso_saml';
+  idp_subject_id?: string;
 }
 
 export interface OrgInvitation {
@@ -44,6 +46,19 @@ export interface OrgInvitation {
   status: 'pending' | 'accepted' | 'expired' | 'revoked';
   expires_at: string;
   created_at?: string;
+}
+
+export interface OrgSsoConfig {
+  org_id: string;
+  enabled: boolean;
+  enforced: boolean;
+  supabase_sso_provider_id?: string;
+  metadata_url?: string;
+  idp_name?: string;
+  default_role: Exclude<OrgRole, 'owner'>;
+  allowed_domains: string[];
+  created_at: string;
+  updated_at: string;
 }
 
 // ============================================

@@ -81,6 +81,13 @@ import {
   handleListOrgApiKeys,
   handleRevokeOrgApiKey,
 } from './org/handlers';
+import {
+  handleCheckDomain,
+  handleGetSsoConfig,
+  handleConfigureSso,
+  handleRemoveSso,
+  handleTestSso,
+} from './org/sso-handlers';
 import { getOrgMembership } from './org/rbac';
 import {
   handleAdminRevenueDashboard,
@@ -1528,6 +1535,62 @@ async function handleGetMe(env: Env, request: Request): Promise<Response> {
     p_email: user.email ?? '',
   });
 
+  // SSO JIT provisioning: auto-add user to org if their email domain matches an SSO config
+  let jitResult: Record<string, unknown> | null = null;
+  if (user.email && user.email.includes('@')) {
+    const emailDomain = user.email.split('@')[1].toLowerCase();
+    const { data: jitData } = await supabaseRpc(env, 'jit_provision_sso_member', {
+      p_user_id: user.sub,
+      p_email: user.email,
+      p_email_domain: emailDomain,
+    });
+    jitResult = jitData as Record<string, unknown> | null;
+
+    // If JIT provisioned, update agents' billing_account_id to org's billing account
+    if (jitResult?.provisioned === true && jitResult.billing_account_id) {
+      const orgBillingAccountId = jitResult.billing_account_id as string;
+
+      // Find user's personal billing account
+      const { data: personalAccountsData } = await supabaseQuery(env, 'billing_accounts', {
+        filters: { user_id: user.sub },
+        select: 'account_id',
+      });
+      const personalAccounts = personalAccountsData as unknown[] | null;
+
+      if (personalAccounts && personalAccounts.length > 0) {
+        const personalAccount = personalAccounts[0] as Record<string, unknown>;
+        const personalAccountId = personalAccount.account_id as string;
+
+        // Update agents from personal to org billing
+        await supabaseUpdate(
+          env,
+          'agents',
+          { user_id: user.sub, billing_account_id: personalAccountId },
+          { billing_account_id: orgBillingAccountId }
+        );
+      }
+
+      // Purge KV cache for affected agents
+      if ((env as any).BILLING_CACHE) {
+        try {
+          const { data: userAgentsData } = await supabaseQuery(env, 'agents', {
+            filters: { user_id: user.sub },
+            select: 'agent_id',
+          });
+          const userAgentsList = userAgentsData as unknown[] | null;
+          if (userAgentsList) {
+            for (const agent of userAgentsList) {
+              const a = agent as Record<string, unknown>;
+              await (env as any).BILLING_CACHE.delete(`billing:${a.agent_id}`);
+            }
+          }
+        } catch (cacheErr) {
+          console.warn('[getMe] KV cache purge failed:', cacheErr);
+        }
+      }
+    }
+  }
+
   const { data: agents, error } = await supabaseQuery(env, 'agents', {
     filters: { user_id: user.sub },
   });
@@ -1538,12 +1601,24 @@ async function handleGetMe(env: Env, request: Request): Promise<Response> {
 
   const billing = billingResult as Record<string, unknown> | null;
 
+  // Get org context for user
+  const { data: orgData } = await supabaseRpc(env, 'get_org_for_user', {
+    p_user_id: user.sub,
+  });
+  const orgRecord = orgData as Record<string, unknown> | null;
+  const org = orgRecord?.org_id ? {
+    org_id: orgRecord.org_id,
+    org_name: orgRecord.name,
+    role: orgRecord.role,
+  } : null;
+
   return jsonResponse({
     user_id: user.sub,
     email: user.email,
     agents: agents || [],
     billing_account_id: billing?.account_id ?? null,
     plan_id: billing?.plan_id ?? null,
+    org: org,
   });
 }
 
@@ -3767,6 +3842,31 @@ export default {
       const orgApiKeyMatch = path.match(/^\/v1\/orgs\/([^/]+)\/api-keys\/([^/]+)$/);
       if (orgApiKeyMatch && method === 'DELETE') {
         return handleRevokeOrgApiKey(env as unknown as BillingEnv, request, getAuthUser as any, orgApiKeyMatch[1], orgApiKeyMatch[2]);
+      }
+
+      // ---- SSO/SAML routes ----
+
+      // GET /v1/auth/sso/check-domain (public, no auth)
+      if (path === '/v1/auth/sso/check-domain' && method === 'GET') {
+        return handleCheckDomain(env as unknown as BillingEnv, request, getAuthUser as any);
+      }
+
+      // GET/PUT/DELETE /v1/orgs/:org_id/sso
+      const orgSsoMatch = path.match(/^\/v1\/orgs\/([^/]+)\/sso$/);
+      if (orgSsoMatch && method === 'GET') {
+        return handleGetSsoConfig(env as unknown as BillingEnv, request, getAuthUser as any, orgSsoMatch[1]);
+      }
+      if (orgSsoMatch && method === 'PUT') {
+        return handleConfigureSso(env as unknown as BillingEnv, request, getAuthUser as any, orgSsoMatch[1]);
+      }
+      if (orgSsoMatch && method === 'DELETE') {
+        return handleRemoveSso(env as unknown as BillingEnv, request, getAuthUser as any, orgSsoMatch[1]);
+      }
+
+      // POST /v1/orgs/:org_id/sso/test
+      const orgSsoTestMatch = path.match(/^\/v1\/orgs\/([^/]+)\/sso\/test$/);
+      if (orgSsoTestMatch && method === 'POST') {
+        return handleTestSso(env as unknown as BillingEnv, request, getAuthUser as any, orgSsoTestMatch[1]);
       }
 
       // GET /v1/auth/me

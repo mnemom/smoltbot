@@ -769,3 +769,58 @@ Self-hosted gateways using this license will no longer be able to validate. Your
 If you believe this is an error, please contact support: support@mnemom.ai`,
   };
 }
+
+export function ssoEnabledEmail(data: { orgName: string; idpName: string; domains: string[] }): EmailTemplate {
+  const domainList = data.domains.join(', ');
+  return {
+    subject: `SSO has been enabled for ${data.orgName}`,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">SSO Enabled for ${data.orgName}</h1>
+      <p style="margin:0 0 12px 0;">Single Sign-On via <strong>${data.idpName}</strong> has been enabled for <strong>${data.orgName}</strong>.</p>
+      <p style="margin:0 0 12px 0;">Members with email addresses matching the following domains will authenticate via SSO:</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;background:#F0FDF4;border-radius:8px;border:1px solid #BBF7D0;">
+        <tr>
+          <td style="padding:16px 20px;">
+            <p style="margin:0;font-weight:600;color:#166534;">${domainList}</p>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#888;">If you did not configure this change, please contact your organization administrator immediately.</p>
+    `),
+    text: `SSO Enabled for ${data.orgName}
+
+Single Sign-On via ${data.idpName} has been enabled for ${data.orgName}.
+
+Members with email addresses matching the following domains will authenticate via SSO: ${domainList}
+
+If you did not configure this change, please contact your organization administrator immediately.`,
+  };
+}
+
+export function ssoMemberAddedEmail(data: { orgName: string; role: string }): EmailTemplate {
+  return {
+    subject: `You've been added to ${data.orgName} via SSO`,
+    html: emailLayout(`
+      <h1 style="margin:0 0 16px 0;font-size:22px;color:#0F172A;">Welcome to ${data.orgName}</h1>
+      <p style="margin:0 0 12px 0;">You've been automatically added to <strong>${data.orgName}</strong> via Single Sign-On as a <strong>${data.role}</strong>.</p>
+      <p style="margin:0 0 20px 0;">You can now access the organization's agents, dashboards, and resources based on your role permissions.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="https://mnemom.ai/dashboard" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Go to Dashboard</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#888;">If you did not expect to be added to this organization, please contact your IT administrator.</p>
+    `),
+    text: `Welcome to ${data.orgName}
+
+You've been automatically added to ${data.orgName} via Single Sign-On as a ${data.role}.
+
+You can now access the organization's agents, dashboards, and resources based on your role permissions.
+
+Go to Dashboard: https://mnemom.ai/dashboard
+
+If you did not expect to be added to this organization, please contact your IT administrator.`,
+  };
+}
