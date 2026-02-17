@@ -662,16 +662,16 @@ export async function handleAdminExportRevenue(
   const { data, error } = await supabaseQuery(
     env,
     'billing_events',
-    `event_type=in.(payment_succeeded,invoice_finalized)&created_at=gte.${startDate}&created_at=lte.${endDate}T23:59:59Z&select=event_id,account_id,event_type,details,created_at&order=created_at.desc`,
+    `event_type=in.(payment_succeeded,invoice_finalized)&timestamp=gte.${startDate}&timestamp=lte.${endDate}T23:59:59Z&select=event_id,account_id,event_type,details,timestamp&order=timestamp.desc`,
   );
   if (error) return errorResponse(`Database error: ${error}`, 500);
 
   const rows = (data as Array<Record<string, unknown>>) || [];
-  let csv = 'event_id,account_id,event_type,amount_cents,created_at\n';
+  let csv = 'event_id,account_id,event_type,amount_cents,timestamp\n';
   for (const row of rows) {
     const details = (row.details as Record<string, unknown>) || {};
     const amount = details.amount_cents ?? details.amount ?? '';
-    csv += `${row.event_id},${row.account_id},${row.event_type},${amount},${row.created_at}\n`;
+    csv += `${row.event_id},${row.account_id},${row.event_type},${amount},${row.timestamp}\n`;
   }
 
   await logAudit(env, admin.sub, 'export_revenue', null, null, { start: startDate, end: endDate }, getClientIp(request));
@@ -753,17 +753,17 @@ export async function handleAdminExportTax(
   const { data, error } = await supabaseQuery(
     env,
     'billing_events',
-    `event_type=in.(payment_succeeded,invoice_finalized)&created_at=gte.${startDate}&created_at=lte.${endDate}T23:59:59Z&select=event_id,account_id,event_type,details,created_at&order=created_at.desc`,
+    `event_type=in.(payment_succeeded,invoice_finalized)&timestamp=gte.${startDate}&timestamp=lte.${endDate}T23:59:59Z&select=event_id,account_id,event_type,details,timestamp&order=timestamp.desc`,
   );
   if (error) return errorResponse(`Database error: ${error}`, 500);
 
   const rows = (data as Array<Record<string, unknown>>) || [];
-  let csv = 'event_id,account_id,event_type,amount_cents,currency,created_at\n';
+  let csv = 'event_id,account_id,event_type,amount_cents,currency,timestamp\n';
   for (const row of rows) {
     const details = (row.details as Record<string, unknown>) || {};
     const amount = details.amount_cents ?? details.amount ?? '';
     const currency = details.currency ?? 'usd';
-    csv += `${row.event_id},${row.account_id},${row.event_type},${amount},${currency},${row.created_at}\n`;
+    csv += `${row.event_id},${row.account_id},${row.event_type},${amount},${currency},${row.timestamp}\n`;
   }
 
   await logAudit(env, admin.sub, 'export_tax', null, null, { start: startDate, end: endDate }, getClientIp(request));
