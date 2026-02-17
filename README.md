@@ -11,6 +11,10 @@ Transparent AI agent tracing. [AAP](https://github.com/mnemom/aap)-compliant.
 
 Smoltbot observes your AI agent's API calls and builds verifiable alignment traces — what decisions were made, what alternatives were considered, and whether behavior matches declared values. Your prompts and responses are never stored.
 
+## Documentation
+
+Full documentation is at **[docs.mnemom.ai/smoltbot/overview](https://docs.mnemom.ai/smoltbot/overview)**.
+
 ## Quick Start
 
 ```bash
