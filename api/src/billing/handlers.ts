@@ -973,6 +973,14 @@ ${message ? `<h3 style="margin-top: 16px;">Use Case</h3><p style="color: #333; w
       console.error('[enterprise] Slack alert failed:', slackErr);
     }
 
+    // Enterprise nurture sequence (best-effort)
+    try {
+      const { enrollInSequence } = await import('./sequences');
+      await enrollInSequence(env, email, 'enterprise_nurture', undefined, { name, company });
+    } catch (seqErr) {
+      console.error('[enterprise] Sequence enrollment failed:', seqErr);
+    }
+
     return jsonResponse({ id: leadId });
   } catch (err) {
     console.error('[enterprise] Contact form error:', err);

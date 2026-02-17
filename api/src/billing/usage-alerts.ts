@@ -7,10 +7,11 @@
 import type { BillingEnv } from './types';
 import {
   sendEmail,
+  sendSequenceEmail,
   usageWarningEmail,
   usageLimitReachedEmail,
   budgetAlertEmail,
-  trialProgressEmail,
+  reEngagementInactiveEmail,
 } from './email';
 
 interface BillingAccount {
@@ -175,44 +176,30 @@ export async function checkUsageAlerts(env: BillingEnv): Promise<void> {
         }
       }
 
-      // 3. Trial progress email (day 3)
-      if (account.subscription_status === 'trialing' && account.created_at) {
-        const daysSinceCreation = Math.floor(
-          (Date.now() - new Date(account.created_at).getTime()) / (24 * 60 * 60 * 1000)
+      // 3. 30-day inactive re-engagement (one-shot, not a sequence)
+      if (
+        account.check_count_this_period === 0 &&
+        account.created_at &&
+        Math.floor((Date.now() - new Date(account.created_at).getTime()) / (24 * 60 * 60 * 1000)) >= 30
+      ) {
+        const existingEvents = await supabaseQuery(
+          env,
+          `billing_events?account_id=eq.${account.account_id}&event_type=eq.inactive_reengagement_sent&select=event_id&limit=1`
         );
 
-        if (daysSinceCreation >= 3 && daysSinceCreation < 4) {
-          // Check if already sent (using billing_events)
-          const existingEvents = await supabaseQuery(
-            env,
-            `billing_events?account_id=eq.${account.account_id}&event_type=eq.trial_progress_sent&select=event_id&limit=1`
-          );
+        if (existingEvents.length === 0) {
+          await sendSequenceEmail(account.billing_email, reEngagementInactiveEmail(), env);
 
-          if (existingEvents.length === 0) {
-            // Count agents linked to this user
-            const agents = await supabaseQuery(
-              env,
-              `agents?user_id=eq.${account.user_id}&select=id`
-            );
+          await supabaseInsert(env, 'billing_events', {
+            event_id: generateId('be'),
+            account_id: account.account_id,
+            event_type: 'inactive_reengagement_sent',
+            details: { checks_used: 0 },
+            performed_by: 'system_cron',
+            timestamp: new Date().toISOString(),
+          });
 
-            await sendEmail(account.billing_email, trialProgressEmail({
-              email: account.billing_email,
-              checksUsed: account.check_count_this_period,
-              agentsLinked: agents.length,
-              daysUsed: daysSinceCreation,
-            }), env);
-
-            await supabaseInsert(env, 'billing_events', {
-              event_id: generateId('be'),
-              account_id: account.account_id,
-              event_type: 'trial_progress_sent',
-              details: { days_used: daysSinceCreation, checks_used: account.check_count_this_period, agents_linked: agents.length },
-              performed_by: 'system_cron',
-              timestamp: new Date().toISOString(),
-            });
-
-            console.log(`[usage-alerts] Sent trial progress to ${account.account_id}`);
-          }
+          console.log(`[usage-alerts] Sent inactive re-engagement to ${account.account_id}`);
         }
       }
     } catch (err) {

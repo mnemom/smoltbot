@@ -87,6 +87,8 @@ export async function hubspotCreateOrUpdateContact(
     mnemom_plan?: string;
     mnemom_account_id?: string;
     mnemom_signup_date?: string;
+    mnemom_email_sequence?: string;
+    mnemom_sequence_step?: string;
     company_size?: string;
     lead_source?: string;
   },

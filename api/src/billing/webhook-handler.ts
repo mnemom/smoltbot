@@ -272,6 +272,22 @@ async function handleCheckoutCompleted(
       } catch (err) {
         console.error('[webhook] Slack alert failed on checkout:', err);
       }
+
+      // Sequence enrollment (best-effort)
+      try {
+        const { enrollInSequence, cancelSequence } = await import('./sequences');
+        const isDev = planId === 'plan-developer';
+        await enrollInSequence(
+          env,
+          email,
+          isDev ? 'developer_onboarding' : 'team_onboarding',
+          accountId,
+        );
+        // Cancel enterprise nurture if they had one (enterprise lead converting)
+        await cancelSequence(env, email, 'enterprise_nurture');
+      } catch (err) {
+        console.error('[webhook] Sequence enrollment failed on checkout:', err);
+      }
     }
   }
 }
@@ -421,6 +437,42 @@ async function handleSubscriptionUpdated(
     }
   }
 
+  // Cancel onboarding sequences on plan upgrade (best-effort)
+  if (newPlanId && newPlanId !== previousPlanId) {
+    try {
+      const { cancelSequence } = await import('./sequences');
+      const planOrder: Record<string, number> = { 'plan-free': 0, 'plan-developer': 1, 'plan-team': 2, 'plan-enterprise': 3 };
+      const wasUpgrade = (planOrder[newPlanId] ?? 0) > (planOrder[previousPlanId] ?? 0);
+      if (wasUpgrade) {
+        const email = (account as Record<string, unknown>).billing_email as string;
+        if (email) {
+          if (previousPlanId === 'plan-developer') {
+            await cancelSequence(env, email, 'developer_onboarding');
+          }
+          await cancelSequence(env, email, 'team_onboarding');
+        }
+      }
+    } catch (err) {
+      console.error('[webhook] Sequence cancellation failed on plan change:', err);
+    }
+  }
+
+  // Cancel team_onboarding when trial converts to active
+  if (status === 'active') {
+    const previousStatus = (account as Record<string, unknown>).subscription_status as string;
+    if (previousStatus === 'trialing') {
+      try {
+        const { cancelSequence } = await import('./sequences');
+        const email = (account as Record<string, unknown>).billing_email as string;
+        if (email) {
+          await cancelSequence(env, email, 'team_onboarding');
+        }
+      } catch (err) {
+        console.error('[webhook] Sequence cancellation failed on trial conversion:', err);
+      }
+    }
+  }
+
   // HubSpot: update contact plan on plan change (best-effort)
   if (newPlanId) {
     try {
@@ -500,6 +552,16 @@ async function handleSubscriptionDeleted(
       });
     } catch (err) {
       console.error('[webhook] HubSpot sync failed on subscription deleted:', err);
+    }
+
+    // Re-engagement sequence for paying customers (not trials)
+    if (!wasTrial) {
+      try {
+        const { enrollInSequence } = await import('./sequences');
+        await enrollInSequence(env, email, 're_engagement_churned', accountId);
+      } catch (err) {
+        console.error('[webhook] Re-engagement enrollment failed:', err);
+      }
     }
   }
 }

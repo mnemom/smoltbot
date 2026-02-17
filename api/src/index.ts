@@ -4304,7 +4304,9 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     const { checkUsageAlerts } = await import('./billing/usage-alerts');
     const { checkLicenseExpiry } = await import('./licensing/expiry-check');
+    const { processSequences } = await import('./billing/sequences');
     await checkUsageAlerts(env as unknown as BillingEnv);
     await checkLicenseExpiry(env as unknown as BillingEnv);
+    await processSequences(env as unknown as BillingEnv);
   },
 };
