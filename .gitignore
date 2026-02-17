@@ -38,3 +38,7 @@ logs/
 
 # Internal design docs
 architecture/
+
+# Database schema and migrations (private)
+database/
+api/migrations/
