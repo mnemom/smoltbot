@@ -722,14 +722,14 @@ export async function handleAdminExportUsageAggregate(
   const { data, error } = await supabaseQuery(
     env,
     'usage_daily_rollup',
-    `period_date=gte.${startDate}&period_date=lte.${endDate}&select=account_id,period_date,check_count,overage_count,cost_cents&order=period_date.desc`,
+    `date=gte.${startDate}&date=lte.${endDate}&select=account_id,date,check_count,cost_estimate&order=date.desc`,
   );
   if (error) return errorResponse(`Database error: ${error}`, 500);
 
   const rows = (data as Array<Record<string, unknown>>) || [];
-  let csv = 'account_id,period_date,check_count,overage_count,cost_cents\n';
+  let csv = 'account_id,date,check_count,cost_estimate\n';
   for (const row of rows) {
-    csv += `${row.account_id},${row.period_date},${row.check_count},${row.overage_count},${row.cost_cents}\n`;
+    csv += `${row.account_id},${row.date},${row.check_count},${row.cost_estimate}\n`;
   }
 
   await logAudit(env, admin.sub, 'export_usage', null, null, { start: startDate, end: endDate }, getClientIp(request));
