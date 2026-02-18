@@ -1295,6 +1295,10 @@ export async function handleGetOrgAgents(
   ]);
   if (roleCheck instanceof Response) return roleCheck;
 
+  // Feature gate: fleet_dashboard
+  const featureGate = await requireOrgFeature(env, orgId, 'fleet_dashboard');
+  if (featureGate) return featureGate;
+
   const { data, error } = await supabaseRpc(env, 'get_org_agent_fleet', {
     p_org_id: orgId,
   });
@@ -1310,7 +1314,7 @@ export async function handleGetOrgAgents(
   const mineOnly = url.searchParams.get('mine') === 'true';
 
   if (mineOnly) {
-    agents = agents.filter(a => a.user_id === user.sub);
+    agents = agents.filter(a => a.owner_email === user.email);
   }
 
   return jsonResponse({ agents });
@@ -1485,4 +1489,144 @@ export async function handleRevokeOrgApiKey(
   });
 
   return jsonResponse({ revoked: true, key_id: keyId });
+}
+
+// ============================================
+// 17. GET /v1/orgs/:org_id/drift — Get Org Drift Alerts
+// ============================================
+
+export async function handleGetOrgDrift(
+  env: BillingEnv,
+  request: Request,
+  getAuth: AuthGetter,
+  orgId: string
+): Promise<Response> {
+  const user = await getAuth(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  const roleCheck = await requireOrgRole(env, user.sub, orgId, [
+    'owner', 'admin', 'member', 'viewer', 'auditor',
+  ]);
+  if (roleCheck instanceof Response) return roleCheck;
+
+  const featureGate = await requireOrgFeature(env, orgId, 'fleet_dashboard');
+  if (featureGate) return featureGate;
+
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 200);
+  const offset = parseInt(url.searchParams.get('offset') ?? '0', 10) || 0;
+
+  const { data, error } = await supabaseRpc(env, 'get_org_drift_alerts', {
+    p_org_id: orgId,
+    p_limit: limit,
+    p_offset: offset,
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  return jsonResponse(data ?? { alerts: [], summary: { total_active: 0, agents_drifting: 0, high_severity: 0, trend: 'stable' } });
+}
+
+// ============================================
+// 18. POST /v1/orgs/:org_id/drift/:alert_id/acknowledge
+// ============================================
+
+export async function handleAcknowledgeDriftAlert(
+  env: BillingEnv,
+  request: Request,
+  getAuth: AuthGetter,
+  orgId: string,
+  alertId: string
+): Promise<Response> {
+  const user = await getAuth(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  // Only owner, admin, member can acknowledge — not viewer/auditor
+  const roleCheck = await requireOrgRole(env, user.sub, orgId, [
+    'owner', 'admin', 'member',
+  ]);
+  if (roleCheck instanceof Response) return roleCheck;
+
+  const featureGate = await requireOrgFeature(env, orgId, 'fleet_dashboard');
+  if (featureGate) return featureGate;
+
+  const { data, error } = await supabaseRpc(env, 'acknowledge_drift_alert', {
+    p_alert_id: alertId,
+    p_org_id: orgId,
+    p_user_id: user.sub,
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  return jsonResponse(data ?? { acknowledged: false });
+}
+
+// ============================================
+// 19. GET /v1/orgs/:org_id/export/fleet — Fleet Export (CSV/PDF)
+// ============================================
+
+export async function handleFleetExport(
+  env: BillingEnv,
+  request: Request,
+  getAuth: AuthGetter,
+  orgId: string
+): Promise<Response> {
+  const user = await getAuth(request, env);
+  if (!user) return errorResponse('Authentication required', 401);
+
+  const roleCheck = await requireOrgRole(env, user.sub, orgId, [
+    'owner', 'admin', 'member', 'viewer', 'auditor',
+  ]);
+  if (roleCheck instanceof Response) return roleCheck;
+
+  const featureGate = await requireOrgFeature(env, orgId, 'fleet_dashboard');
+  if (featureGate) return featureGate;
+
+  const url = new URL(request.url);
+  const format = url.searchParams.get('format') ?? 'csv';
+
+  // Fetch fleet data
+  const { data, error } = await supabaseRpc(env, 'get_org_agent_fleet', {
+    p_org_id: orgId,
+  });
+
+  if (error) {
+    return errorResponse(`Database error: ${error}`, 500);
+  }
+
+  const agents = (data ?? []) as Array<Record<string, unknown>>;
+
+  if (format === 'pdf') {
+    const { generateFleetPdf } = await import('./pdf-export');
+    const org = (roleCheck as { org: { name: string } }).org;
+    const pdfBytes = await generateFleetPdf(agents, org.name);
+    return new Response(pdfBytes, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `attachment; filename="fleet-report-${new Date().toISOString().split('T')[0]}.pdf"`,
+        'Access-Control-Allow-Origin': '*',
+      },
+    });
+  }
+
+  // Default: CSV
+  let csv = 'Agent Name,Owner Email,Integrity Score,Latest Verdict,Last Seen,Active Drift Alerts,Worst Severity,Checks This Period,Created\n';
+  for (const a of agents) {
+    const score = typeof a.integrity_score === 'number' ? Math.round((a.integrity_score as number) * 100) + '%' : 'N/A';
+    csv += `"${a.agent_name ?? ''}","${a.owner_email ?? ''}",${score},${a.latest_verdict ?? 'none'},${a.last_seen ?? 'never'},${a.active_drift_alerts ?? 0},${a.worst_drift_severity ?? 'none'},${a.check_count ?? 0},${a.created_at ?? ''}\n`;
+  }
+
+  return new Response(csv, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/csv',
+      'Content-Disposition': `attachment; filename="fleet-${new Date().toISOString().split('T')[0]}.csv"`,
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
 }

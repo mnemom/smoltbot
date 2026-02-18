@@ -80,6 +80,9 @@ import {
   handleCreateOrgApiKey,
   handleListOrgApiKeys,
   handleRevokeOrgApiKey,
+  handleGetOrgDrift,
+  handleAcknowledgeDriftAlert,
+  handleFleetExport,
 } from './org/handlers';
 import {
   handleCheckDomain,
@@ -3827,6 +3830,24 @@ export default {
       const orgAgentsMatch = path.match(/^\/v1\/orgs\/([^/]+)\/agents$/);
       if (orgAgentsMatch && method === 'GET') {
         return handleGetOrgAgents(env as unknown as BillingEnv, request, getAuthUser as any, orgAgentsMatch[1]);
+      }
+
+      // GET /v1/orgs/:org_id/drift
+      const orgDriftMatch = path.match(/^\/v1\/orgs\/([^/]+)\/drift$/);
+      if (orgDriftMatch && method === 'GET') {
+        return handleGetOrgDrift(env as unknown as BillingEnv, request, getAuthUser as any, orgDriftMatch[1]);
+      }
+
+      // POST /v1/orgs/:org_id/drift/:alert_id/acknowledge
+      const orgDriftAckMatch = path.match(/^\/v1\/orgs\/([^/]+)\/drift\/([^/]+)\/acknowledge$/);
+      if (orgDriftAckMatch && method === 'POST') {
+        return handleAcknowledgeDriftAlert(env as unknown as BillingEnv, request, getAuthUser as any, orgDriftAckMatch[1], orgDriftAckMatch[2]);
+      }
+
+      // GET /v1/orgs/:org_id/export/fleet
+      const orgFleetExportMatch = path.match(/^\/v1\/orgs\/([^/]+)\/export\/fleet$/);
+      if (orgFleetExportMatch && method === 'GET') {
+        return handleFleetExport(env as unknown as BillingEnv, request, getAuthUser as any, orgFleetExportMatch[1]);
       }
 
       // POST /v1/orgs/:org_id/api-keys
