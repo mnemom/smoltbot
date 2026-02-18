@@ -1,0 +1,17 @@
+apiVersion: v2
+name: mnemom-gateway
+description: Self-hosted mnemom AI gateway for enterprise deployments
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - ai
+  - gateway
+  - mnemom
+  - enterprise
+home: https://mnemom.ai
+sources:
+  - https://github.com/mnemom/smoltbot
+maintainers:
+  - name: mnemom
+    email: support@mnemom.ai

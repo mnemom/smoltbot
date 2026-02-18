@@ -125,6 +125,16 @@ import {
   handleAnalyze,
   handleAnalyzeBatch,
 } from './analyze/handlers';
+import {
+  handleRegisterDeployment,
+  handleListOrgDeployments,
+  handleGetDeployment,
+  handleUpdateDeployment,
+  handleDeleteDeployment,
+  handleDeploymentHeartbeat,
+  handleAdminListDeployments,
+  handleAdminGetDeployment,
+} from './deployments/handlers';
 
 export interface Env {
   SUPABASE_URL: string;
@@ -4332,6 +4342,53 @@ export default {
       // POST /v1/analyze/batch
       if (path === '/v1/analyze/batch' && method === 'POST') {
         return handleAnalyzeBatch(env as unknown as BillingEnv, request);
+      }
+
+      // ============================================
+      // PHASE 10: SELF-HOSTED DEPLOYMENT ROUTES
+      // ============================================
+
+      // POST /v1/deployments/heartbeat (license JWT auth — no org context)
+      if (path === '/v1/deployments/heartbeat' && method === 'POST') {
+        return handleDeploymentHeartbeat(env as unknown as BillingEnv, request);
+      }
+
+      // POST /v1/orgs/:org_id/deployments
+      const orgDeploymentsMatch = path.match(/^\/v1\/orgs\/([^/]+)\/deployments$/);
+      if (orgDeploymentsMatch && method === 'POST') {
+        return handleRegisterDeployment(env as unknown as BillingEnv, request, getAuthUser as any, orgDeploymentsMatch[1]);
+      }
+
+      // GET /v1/orgs/:org_id/deployments
+      if (orgDeploymentsMatch && method === 'GET') {
+        return handleListOrgDeployments(env as unknown as BillingEnv, request, getAuthUser as any, orgDeploymentsMatch[1]);
+      }
+
+      // GET /v1/orgs/:org_id/deployments/:deploymentId
+      const orgDeploymentDetailMatch = path.match(/^\/v1\/orgs\/([^/]+)\/deployments\/([^/]+)$/);
+      if (orgDeploymentDetailMatch && method === 'GET') {
+        return handleGetDeployment(env as unknown as BillingEnv, request, getAuthUser as any, orgDeploymentDetailMatch[1], orgDeploymentDetailMatch[2]);
+      }
+
+      // PUT /v1/orgs/:org_id/deployments/:deploymentId
+      if (orgDeploymentDetailMatch && method === 'PUT') {
+        return handleUpdateDeployment(env as unknown as BillingEnv, request, getAuthUser as any, orgDeploymentDetailMatch[1], orgDeploymentDetailMatch[2]);
+      }
+
+      // DELETE /v1/orgs/:org_id/deployments/:deploymentId
+      if (orgDeploymentDetailMatch && method === 'DELETE') {
+        return handleDeleteDeployment(env as unknown as BillingEnv, request, getAuthUser as any, orgDeploymentDetailMatch[1], orgDeploymentDetailMatch[2]);
+      }
+
+      // GET /v1/admin/deployments
+      if (path === '/v1/admin/deployments' && method === 'GET') {
+        return handleAdminListDeployments(env as unknown as BillingEnv, request, requireAdmin as any, url);
+      }
+
+      // GET /v1/admin/deployments/:deploymentId
+      const adminDeploymentDetailMatch = path.match(/^\/v1\/admin\/deployments\/([^/]+)$/);
+      if (adminDeploymentDetailMatch && method === 'GET') {
+        return handleAdminGetDeployment(env as unknown as BillingEnv, request, requireAdmin as any, adminDeploymentDetailMatch[1]);
       }
 
       // 404 for unmatched routes

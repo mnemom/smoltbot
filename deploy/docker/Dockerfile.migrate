@@ -1,0 +1,19 @@
+# =============================================================================
+# smoltbot Database Migration Runner
+# =============================================================================
+# Applies SQL migrations from database/migrations/ against PostgreSQL.
+# Designed to run as a one-shot init container or compose service.
+# =============================================================================
+
+FROM node:22-alpine
+
+RUN apk add --no-cache postgresql16-client bash
+
+WORKDIR /app
+
+COPY database/ ./database/
+COPY deploy/scripts/migrate.sh ./migrate.sh
+
+RUN chmod +x migrate.sh
+
+ENTRYPOINT ["./migrate.sh"]
