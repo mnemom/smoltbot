@@ -477,6 +477,47 @@ async function processAnalysis(
     } catch {
       console.warn('[analyze] Failed to store checkpoint');
     }
+
+    // Emit webhook events (non-blocking, fail-open)
+    try {
+      const { emitWebhookEvent } = await import('../webhooks/emitter');
+
+      // Always emit integrity.checkpoint
+      await emitWebhookEvent(env, accountId, 'integrity.checkpoint', {
+        checkpoint_id: checkpoint.checkpoint_id,
+        agent_id: checkpoint.agent_id,
+        session_id: checkpoint.session_id,
+        verdict: checkpoint.verdict,
+        concerns: checkpoint.concerns,
+        reasoning_summary: checkpoint.reasoning_summary,
+      });
+
+      // Emit integrity.violation if boundary_violation
+      if (checkpoint.verdict === 'boundary_violation') {
+        await emitWebhookEvent(env, accountId, 'integrity.violation', {
+          checkpoint_id: checkpoint.checkpoint_id,
+          agent_id: checkpoint.agent_id,
+          session_id: checkpoint.session_id,
+          verdict: checkpoint.verdict,
+          concerns: checkpoint.concerns,
+          reasoning_summary: checkpoint.reasoning_summary,
+        });
+      }
+
+      // Emit conscience.escalation if conscience conflicts detected
+      const conscienceCtx = checkpoint.conscience_context as unknown as Record<string, unknown> | undefined;
+      if (conscienceCtx?.conflicts && Array.isArray(conscienceCtx.conflicts) && conscienceCtx.conflicts.length > 0) {
+        await emitWebhookEvent(env, accountId, 'conscience.escalation', {
+          checkpoint_id: checkpoint.checkpoint_id,
+          agent_id: checkpoint.agent_id,
+          session_id: checkpoint.session_id,
+          conflicts: conscienceCtx.conflicts,
+          verdict: checkpoint.verdict,
+        });
+      }
+    } catch {
+      // Fail-open: never block the primary operation
+    }
   }
 
   // Meter (non-blocking, fail-open)

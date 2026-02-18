@@ -1562,6 +1562,18 @@ export async function handleAcknowledgeDriftAlert(
     return errorResponse(`Database error: ${error}`, 500);
   }
 
+  // Emit drift.resolved webhook event (non-blocking, fail-open)
+  try {
+    const { emitWebhookEvent } = await import('../webhooks/emitter');
+    await emitWebhookEvent(env, roleCheck.org.billing_account_id, 'drift.resolved', {
+      alert_id: alertId,
+      org_id: orgId,
+      acknowledged_by: user.sub,
+    });
+  } catch {
+    // Fail-open
+  }
+
   return jsonResponse(data ?? { acknowledged: false });
 }
 

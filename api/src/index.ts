@@ -135,6 +135,18 @@ import {
   handleAdminListDeployments,
   handleAdminGetDeployment,
 } from './deployments/handlers';
+import {
+  handleCreateWebhookEndpoint,
+  handleListWebhookEndpoints,
+  handleGetWebhookEndpoint,
+  handleUpdateWebhookEndpoint,
+  handleDeleteWebhookEndpoint,
+  handleRotateWebhookSecret,
+  handleTestWebhookEndpoint,
+  handleGetDeliveryLog,
+  handleRedeliverWebhookEvent,
+  handleAdminWebhookHealth,
+} from './webhooks/handlers';
 
 export interface Env {
   SUPABASE_URL: string;
@@ -2469,6 +2481,35 @@ async function handleGetAipDrift(env: Env, agentId: string): Promise<Response> {
     }
   }
 
+  // Emit drift.detected webhook events (non-blocking, fail-open)
+  if (alerts.length > 0) {
+    try {
+      const { emitWebhookEvent } = await import('./webhooks/emitter');
+      // Look up billing_account_id from agent
+      const { data: agentData } = await supabaseQuery(env, 'agents', {
+        eq: ['id', agentId],
+        select: 'billing_account_id',
+        single: true,
+      });
+      const billingAccountId = (agentData as Record<string, unknown>)?.billing_account_id as string;
+      if (billingAccountId) {
+        for (const alert of alerts) {
+          await emitWebhookEvent(env as unknown as BillingEnv, billingAccountId, 'drift.detected', {
+            alert_id: alert.alert_id,
+            agent_id: alert.agent_id,
+            session_id: alert.session_id,
+            severity: alert.severity,
+            drift_direction: alert.drift_direction,
+            sustained_checks: alert.sustained_checks,
+            message: alert.message,
+          });
+        }
+      }
+    } catch {
+      // Fail-open
+    }
+  }
+
   return jsonResponse({ alerts, agent_id: agentId });
 }
 
@@ -3932,6 +3973,59 @@ export default {
         return handleTestSso(env as unknown as BillingEnv, request, getAuthUser as any, orgSsoTestMatch[1]);
       }
 
+      // ---- Webhook Notification routes ----
+
+      // GET /v1/orgs/:org_id/webhooks/deliveries (must be before /:endpoint_id)
+      const orgWebhookDeliveriesMatch = path.match(/^\/v1\/orgs\/([^/]+)\/webhooks\/deliveries$/);
+      if (orgWebhookDeliveriesMatch && method === 'GET') {
+        return handleGetDeliveryLog(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhookDeliveriesMatch[1]);
+      }
+
+      // POST /v1/orgs/:org_id/webhooks/deliveries/:delivery_id/redeliver
+      const orgWebhookRedeliverMatch = path.match(/^\/v1\/orgs\/([^/]+)\/webhooks\/deliveries\/([^/]+)\/redeliver$/);
+      if (orgWebhookRedeliverMatch && method === 'POST') {
+        return handleRedeliverWebhookEvent(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhookRedeliverMatch[1], orgWebhookRedeliverMatch[2]);
+      }
+
+      // POST /v1/orgs/:org_id/webhooks (create endpoint)
+      const orgWebhooksMatch = path.match(/^\/v1\/orgs\/([^/]+)\/webhooks$/);
+      if (orgWebhooksMatch && method === 'POST') {
+        return handleCreateWebhookEndpoint(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhooksMatch[1]);
+      }
+      // GET /v1/orgs/:org_id/webhooks (list endpoints)
+      if (orgWebhooksMatch && method === 'GET') {
+        return handleListWebhookEndpoints(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhooksMatch[1]);
+      }
+
+      // POST /v1/orgs/:org_id/webhooks/:endpoint_id/rotate-secret
+      const orgWebhookRotateMatch = path.match(/^\/v1\/orgs\/([^/]+)\/webhooks\/([^/]+)\/rotate-secret$/);
+      if (orgWebhookRotateMatch && method === 'POST') {
+        return handleRotateWebhookSecret(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhookRotateMatch[1], orgWebhookRotateMatch[2]);
+      }
+
+      // POST /v1/orgs/:org_id/webhooks/:endpoint_id/test
+      const orgWebhookTestMatch = path.match(/^\/v1\/orgs\/([^/]+)\/webhooks\/([^/]+)\/test$/);
+      if (orgWebhookTestMatch && method === 'POST') {
+        return handleTestWebhookEndpoint(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhookTestMatch[1], orgWebhookTestMatch[2]);
+      }
+
+      // GET/PATCH/DELETE /v1/orgs/:org_id/webhooks/:endpoint_id
+      const orgWebhookDetailMatch = path.match(/^\/v1\/orgs\/([^/]+)\/webhooks\/([^/]+)$/);
+      if (orgWebhookDetailMatch && method === 'GET') {
+        return handleGetWebhookEndpoint(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhookDetailMatch[1], orgWebhookDetailMatch[2]);
+      }
+      if (orgWebhookDetailMatch && method === 'PATCH') {
+        return handleUpdateWebhookEndpoint(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhookDetailMatch[1], orgWebhookDetailMatch[2]);
+      }
+      if (orgWebhookDetailMatch && method === 'DELETE') {
+        return handleDeleteWebhookEndpoint(env as unknown as BillingEnv, request, getAuthUser as any, orgWebhookDetailMatch[1], orgWebhookDetailMatch[2]);
+      }
+
+      // GET /v1/admin/webhooks/health
+      if (path === '/v1/admin/webhooks/health' && method === 'GET') {
+        return handleAdminWebhookHealth(env as unknown as BillingEnv, request, requireAdmin as any);
+      }
+
       // GET /v1/auth/me
       if (path === '/v1/auth/me' && method === 'GET') {
         return handleGetMe(env, request);
@@ -4413,8 +4507,10 @@ export default {
     const { checkUsageAlerts } = await import('./billing/usage-alerts');
     const { checkLicenseExpiry } = await import('./licensing/expiry-check');
     const { processSequences } = await import('./billing/sequences');
+    const { processWebhookDeliveries } = await import('./webhooks/delivery');
     await checkUsageAlerts(env as unknown as BillingEnv);
     await checkLicenseExpiry(env as unknown as BillingEnv);
     await processSequences(env as unknown as BillingEnv);
+    await processWebhookDeliveries(env as unknown as BillingEnv);
   },
 };

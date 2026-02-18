@@ -499,6 +499,19 @@ async function handleSubscriptionUpdated(
       text: 'Your organization\'s Mnemom subscription has been updated. Check your billing dashboard for details: https://mnemom.ai/settings/billing',
     });
   }
+
+  // Emit subscription.status_changed webhook (non-blocking, fail-open)
+  try {
+    const { emitWebhookEvent } = await import('../webhooks/emitter');
+    await emitWebhookEvent(env, accountId, 'subscription.status_changed', {
+      status,
+      previous_plan_id: previousPlanId,
+      new_plan_id: newPlanId ?? previousPlanId,
+      cancel_at_period_end: cancelAtPeriodEnd,
+    });
+  } catch {
+    // Fail-open
+  }
 }
 
 async function handleSubscriptionDeleted(
@@ -563,6 +576,17 @@ async function handleSubscriptionDeleted(
         console.error('[webhook] Re-engagement enrollment failed:', err);
       }
     }
+  }
+
+  // Emit subscription.status_changed webhook (non-blocking, fail-open)
+  try {
+    const { emitWebhookEvent } = await import('../webhooks/emitter');
+    await emitWebhookEvent(env, accountId, 'subscription.status_changed', {
+      status: 'canceled',
+      new_plan_id: 'plan-free',
+    });
+  } catch {
+    // Fail-open
   }
 }
 

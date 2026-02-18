@@ -140,6 +140,26 @@ export async function checkUsageAlerts(env: BillingEnv): Promise<void> {
           });
 
           console.log(`[usage-alerts] Sent usage warning to ${account.account_id} (${Math.round(usagePercent)}%)`);
+
+          // Emit quota webhook events (non-blocking, fail-open)
+          try {
+            const { emitWebhookEvent } = await import('../webhooks/emitter');
+            if (usagePercent >= 100) {
+              await emitWebhookEvent(env, account.account_id, 'quota.exceeded', {
+                usage_percent: Math.round(usagePercent),
+                checks_used: account.check_count_this_period,
+                checks_included: plan.included_checks,
+              });
+            } else {
+              await emitWebhookEvent(env, account.account_id, 'quota.warning', {
+                usage_percent: Math.round(usagePercent),
+                checks_used: account.check_count_this_period,
+                checks_included: plan.included_checks,
+              });
+            }
+          } catch {
+            // Fail-open
+          }
         }
       }
 

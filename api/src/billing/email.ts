@@ -1377,3 +1377,44 @@ Go to Dashboard: https://mnemom.ai/dashboard
 If you did not expect to be added to this organization, please contact your IT administrator.`,
   };
 }
+
+export function webhookDisabledEmail(data: { endpointUrl: string; endpointId: string; failureCount: number }): EmailTemplate {
+  return {
+    subject: 'Webhook endpoint auto-disabled due to delivery failures',
+    html: emailLayout(`
+      <div style="background-color:#DC2626;padding:12px 16px;border-radius:6px 6px 0 0;margin:-24px -32px 20px -32px;">
+        <p style="margin:0;color:#ffffff;font-weight:600;font-size:15px;">Webhook Endpoint Disabled</p>
+      </div>
+      <p style="margin:0 0 12px 0;">Your webhook endpoint has been automatically disabled after <strong>${data.failureCount} consecutive delivery failures</strong>.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 16px 0;width:100%;">
+        <tr>
+          <td style="padding:12px 16px;background-color:#F1F5F9;border-radius:6px;font-family:monospace;font-size:13px;">
+            <strong>Endpoint:</strong> ${data.endpointUrl}<br>
+            <strong>ID:</strong> ${data.endpointId}
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0 0 16px 0;">To resume receiving webhook notifications, fix the issue with your endpoint and re-enable it in your organization settings.</p>
+      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px 0;">
+        <tr>
+          <td style="border-radius:6px;background-color:#D97706;">
+            <a href="https://mnemom.ai/settings/org" style="display:inline-block;padding:12px 28px;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;">Go to Settings</a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:0;font-size:13px;color:#888;">Common causes: endpoint returning 5xx errors, DNS resolution failures, connection timeouts (&gt;10s).</p>
+    `),
+    text: `Webhook Endpoint Disabled
+
+Your webhook endpoint has been automatically disabled after ${data.failureCount} consecutive delivery failures.
+
+Endpoint: ${data.endpointUrl}
+ID: ${data.endpointId}
+
+To resume receiving webhook notifications, fix the issue with your endpoint and re-enable it in your organization settings.
+
+Go to Settings: https://mnemom.ai/settings/org
+
+Common causes: endpoint returning 5xx errors, DNS resolution failures, connection timeouts (>10s).`,
+  };
+}
