@@ -2847,21 +2847,27 @@ async function handleAdminAgents(env: Env, request: Request, url: URL): Promise<
 
   const agents = (agentsData as Array<Record<string, unknown>>) || [];
 
-  // Join summary data and compute integrity_ratio
+  // Join summary data and compute integrity_ratio from analyzed checks only
   const enriched = agents.map(agent => {
     const summary = summaryMap[agent.id as string] || {};
     const checkpointCount = (summary.checkpoint_count as number) || 0;
+    const analyzedCount = (summary.analyzed_count as number) ?? checkpointCount;
     const clearCount = (summary.clear_count as number) || 0;
-    const integrityRatio = checkpointCount > 0
-      ? Math.round((clearCount / checkpointCount) * 1000) / 1000
+    const integrityRatio = analyzedCount > 0
+      ? Math.round((clearCount / analyzedCount) * 1000) / 1000
+      : 0;
+    const coverageRatio = checkpointCount > 0
+      ? Math.round((analyzedCount / checkpointCount) * 1000) / 1000
       : 0;
 
     return {
       ...agent,
       trace_count: summary.trace_count || 0,
       checkpoint_count: checkpointCount,
+      analyzed_count: analyzedCount,
       clear_count: clearCount,
       integrity_ratio: integrityRatio,
+      coverage_ratio: coverageRatio,
     };
   });
 
