@@ -1385,6 +1385,7 @@ async function runIntegrityCheck(
       card: aipCard,
       conscience_values: [...DEFAULT_CONSCIENCE_VALUES],
       initial_checkpoints: initialCheckpoints,
+      min_evidence_tokens: 25, // ~100 chars — analyze any real sentence of reasoning
       analysis_llm: {
         model: 'claude-haiku-4-5-20251001',
         base_url: analysisBaseUrl,

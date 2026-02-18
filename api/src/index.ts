@@ -1888,9 +1888,10 @@ async function handleGetAipIntegrity(env: Env, agentId: string): Promise<Respons
   }
 
   // Manual calculation from integrity_checkpoints table
+  // Include analysis_metadata to distinguish synthetic (unanalyzed) from real checks
   const { data: checkpoints, error } = await supabaseQuery(env, 'integrity_checkpoints', {
     filters: { agent_id: agentId },
-    select: 'checkpoint_id,verdict,timestamp,re_evaluated_at',
+    select: 'checkpoint_id,verdict,timestamp,re_evaluated_at,analysis_metadata',
   });
 
   if (error) {
@@ -1902,14 +1903,34 @@ async function handleGetAipIntegrity(env: Env, agentId: string): Promise<Respons
     verdict: string;
     timestamp: string;
     re_evaluated_at: string | null;
+    analysis_metadata: {
+      analysis_duration_ms?: number;
+      extraction_confidence?: number;
+      thinking_tokens_analyzed?: number;
+    } | null;
   }>;
 
+  // Synthetic checkpoints have checkpoint_id starting with 'ic-synthetic-'
+  // or analysis_metadata with duration=0 and confidence=0 and tokens_analyzed=0
+  const isSynthetic = (c: typeof checkpointList[number]): boolean => {
+    if (c.checkpoint_id.startsWith('ic-synthetic-')) return true;
+    const meta = c.analysis_metadata;
+    if (meta && meta.analysis_duration_ms === 0 && meta.extraction_confidence === 0 && meta.thinking_tokens_analyzed === 0) return true;
+    return false;
+  };
+
   const totalChecks = checkpointList.length;
-  const clearCount = checkpointList.filter(c => c.verdict === 'clear').length;
+  const analyzedList = checkpointList.filter(c => !isSynthetic(c));
+  const unanalyzedChecks = totalChecks - analyzedList.length;
+  const analyzedChecks = analyzedList.length;
+
+  const clearCount = analyzedList.filter(c => c.verdict === 'clear').length;
   // Resolved checkpoints (re_evaluated_at set) should not count as active reviews/violations
-  const reviewCount = checkpointList.filter(c => c.verdict === 'review_needed' && !c.re_evaluated_at).length;
-  const violationCount = checkpointList.filter(c => c.verdict === 'boundary_violation' && !c.re_evaluated_at).length;
-  const integrityRatio = totalChecks > 0 ? Math.round((clearCount / totalChecks) * 1000) / 1000 : 0;
+  const reviewCount = analyzedList.filter(c => c.verdict === 'review_needed' && !c.re_evaluated_at).length;
+  const violationCount = analyzedList.filter(c => c.verdict === 'boundary_violation' && !c.re_evaluated_at).length;
+  // Integrity ratio is based on analyzed checks only — synthetic clears are not verified integrity
+  const integrityRatio = analyzedChecks > 0 ? Math.round((clearCount / analyzedChecks) * 1000) / 1000 : 0;
+  const coverageRatio = totalChecks > 0 ? Math.round((analyzedChecks / totalChecks) * 1000) / 1000 : 0;
 
   // Find the latest verdict by timestamp
   let latestVerdict: string | null = null;
@@ -1923,10 +1944,13 @@ async function handleGetAipIntegrity(env: Env, agentId: string): Promise<Respons
   return jsonResponse({
     agent_id: agentId,
     total_checks: totalChecks,
+    analyzed_checks: analyzedChecks,
+    unanalyzed_checks: unanalyzedChecks,
     clear_count: clearCount,
     review_count: reviewCount,
     violation_count: violationCount,
     integrity_ratio: integrityRatio,
+    coverage_ratio: coverageRatio,
     latest_verdict: latestVerdict,
   });
 }

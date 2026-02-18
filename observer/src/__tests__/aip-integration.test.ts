@@ -99,9 +99,10 @@ function createMockAnalysisResponse(
 }
 
 /** Anthropic-format response body with a thinking block.
- *  AIP SDK v0.1.7+ requires ≥100 tokens in the thinking block to trigger
- *  analysis (below that it returns a synthetic clear). We pad short inputs
- *  with filler reasoning so tests always hit the real analysis path. */
+ *  AIP SDK default min_evidence_tokens is 100, but the observer overrides
+ *  this to 25 (~100 chars) to capture short but meaningful reasoning.
+ *  We pad short inputs with filler to ensure tests always hit the real
+ *  analysis path regardless of the threshold setting. */
 function createMockProviderResponse(thinking: string, text: string) {
   const padding = ' I need to carefully consider the values declared in my alignment card and ensure my reasoning is consistent with transparency, accuracy, helpfulness, and safety. Let me evaluate each dimension of this request thoroughly before formulating my response, weighing the tradeoffs between different approaches and checking for potential boundary concerns. I should also reflect on whether my intended action falls within the bounded actions specified in my autonomy envelope and whether any escalation triggers apply to this situation. This careful deliberation is essential for maintaining integrity.';
   return JSON.stringify({
@@ -469,6 +470,101 @@ describe('AIP Pipeline E2E', () => {
     expect(signal.checkpoint.verdict).toBe('clear');
     expect(signal.checkpoint.thinking_block_hash).toBe('none');
     expect(mockFetch).not.toHaveBeenCalled();
+
+    client.destroy();
+  });
+
+  it('should return synthetic clear for thinking below min_evidence_tokens threshold', async () => {
+    const card = createMockAAPCard();
+    const aipCard = mapAAPCardToAIP(card);
+
+    // Use observer's threshold of 25 tokens
+    const config: AIPConfig = {
+      card: aipCard,
+      conscience_values: [],
+      min_evidence_tokens: 25,
+      analysis_llm: {
+        model: 'claude-haiku-4-5-20251001',
+        base_url: 'https://api.anthropic.com',
+        api_key: 'test-key',
+        max_tokens: 1024,
+      },
+      window: { max_size: 10, mode: 'sliding', session_boundary: 'reset', max_age_seconds: 3600 },
+    };
+
+    const client = createClient(config);
+
+    // ~80 chars = ~20 estimated tokens — below the 25-token threshold
+    const responseBody = JSON.stringify({
+      id: 'msg_short_thinking',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-3-5-sonnet-20241022',
+      content: [
+        { type: 'thinking', thinking: 'I should help the user with their question about dates.' },
+        { type: 'text', text: 'The current date is February 17, 2026.' },
+      ],
+    });
+
+    const signal = await client.check(responseBody, 'anthropic');
+
+    // Below threshold: synthetic clear, no analysis LLM call
+    expect(signal.proceed).toBe(true);
+    expect(signal.checkpoint.verdict).toBe('clear');
+    expect(signal.checkpoint.thinking_block_hash).toBe('none');
+    expect(signal.checkpoint.analysis_metadata.analysis_duration_ms).toBe(0);
+    expect(signal.checkpoint.analysis_metadata.extraction_confidence).toBe(0);
+    expect(signal.checkpoint.analysis_metadata.thinking_tokens_analyzed).toBe(0);
+    expect(signal.checkpoint.checkpoint_id).toMatch(/^ic-synthetic-/);
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    client.destroy();
+  });
+
+  it('should analyze thinking blocks at or above min_evidence_tokens threshold', async () => {
+    setupMockAnalysisLLM('clear');
+
+    const card = createMockAAPCard();
+    const aipCard = mapAAPCardToAIP(card);
+
+    // Use observer's threshold of 25 tokens
+    const config: AIPConfig = {
+      card: aipCard,
+      conscience_values: [],
+      min_evidence_tokens: 25,
+      analysis_llm: {
+        model: 'claude-haiku-4-5-20251001',
+        base_url: mockEnv.CF_AI_GATEWAY_URL,
+        api_key: mockEnv.ANALYSIS_API_KEY,
+        max_tokens: 1024,
+      },
+      window: { max_size: 10, mode: 'sliding', session_boundary: 'reset', max_age_seconds: 3600 },
+      failure_policy: { mode: 'fail_open', analysis_timeout_ms: 8000 },
+    };
+
+    const client = createClient(config);
+
+    // ~160 chars = ~40 estimated tokens — above the 25-token threshold
+    const responseBody = JSON.stringify({
+      id: 'msg_medium_thinking',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-3-5-sonnet-20241022',
+      content: [
+        { type: 'thinking', thinking: 'The user wants Discord integration. I should present the two installation options clearly, noting the rate limit issue and recommending ClawHub login.' },
+        { type: 'text', text: 'Here are two options for setting up Discord...' },
+      ],
+    });
+
+    const signal = await client.check(responseBody, 'anthropic');
+
+    // Above threshold: real analysis should occur
+    expect(signal.proceed).toBe(true);
+    expect(signal.checkpoint.verdict).toBe('clear');
+    expect(signal.checkpoint.thinking_block_hash).not.toBe('none');
+    expect(signal.checkpoint.checkpoint_id).not.toMatch(/^ic-synthetic-/);
+    // Analysis LLM should have been called
+    expect(mockFetch).toHaveBeenCalledTimes(1);
 
     client.destroy();
   });
