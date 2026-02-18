@@ -1,0 +1,259 @@
+# -- Number of gateway replicas
+replicaCount: 2
+
+image:
+  # -- Container image repository
+  repository: ghcr.io/mnemom/gateway
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag (defaults to .Chart.AppVersion)
+  tag: ""
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+# -- Override the release name
+nameOverride: ""
+# -- Override the full release name
+fullnameOverride: ""
+
+# -------------------------------------------------------------------
+# Observer (scheduler) deployment
+# -------------------------------------------------------------------
+observer:
+  # -- Number of observer replicas
+  replicas: 1
+  # -- Resource requests and limits for the observer
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+# -------------------------------------------------------------------
+# Service
+# -------------------------------------------------------------------
+service:
+  # -- Kubernetes Service type
+  type: ClusterIP
+  # -- Service port
+  port: 8787
+
+# -------------------------------------------------------------------
+# Ingress
+# -------------------------------------------------------------------
+ingress:
+  # -- Enable ingress resource
+  enabled: false
+  # -- Ingress class name
+  className: ""
+  # -- Additional ingress annotations
+  annotations: {}
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: gateway.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS configuration
+  tls: []
+  #  - secretName: gateway-tls
+  #    hosts:
+  #      - gateway.example.com
+
+# -------------------------------------------------------------------
+# Resources
+# -------------------------------------------------------------------
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "1"
+    memory: "512Mi"
+
+# -------------------------------------------------------------------
+# Probes
+# -------------------------------------------------------------------
+probes:
+  liveness:
+    path: /health/live
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /health/ready
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startup:
+    path: /health/startup
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 30
+
+# -------------------------------------------------------------------
+# Secrets
+# -------------------------------------------------------------------
+secrets:
+  # -- Use an existing secret instead of creating one.
+  # When set, the chart will NOT create a Secret resource.
+  existingSecret: ""
+  # -- Inline secret values (only used when existingSecret is empty)
+  values:
+    SUPABASE_URL: ""
+    SUPABASE_KEY: ""
+    ANTHROPIC_API_KEY: ""
+    MNEMOM_LICENSE_JWT: ""
+    DATABASE_URL: ""
+    REDIS_URL: ""
+
+# -------------------------------------------------------------------
+# Non-sensitive configuration
+# -------------------------------------------------------------------
+config:
+  LOG_LEVEL: "info"
+  SMOLTBOT_ROLE: "gateway"
+  PORT: "8787"
+
+# -------------------------------------------------------------------
+# Redis
+# -------------------------------------------------------------------
+redis:
+  # -- Deploy an internal Redis instance (Bitnami sub-chart style)
+  enabled: true
+  # -- External Redis URL (used when redis.enabled is false)
+  externalUrl: ""
+  # -- Internal Redis settings (passed to sub-chart)
+  architecture: standalone
+  auth:
+    enabled: false
+
+# -------------------------------------------------------------------
+# PostgreSQL
+# -------------------------------------------------------------------
+postgresql:
+  # -- Deploy an internal PostgreSQL instance (Bitnami sub-chart style)
+  enabled: true
+  # -- External PostgreSQL URL (used when postgresql.enabled is false)
+  externalUrl: ""
+  auth:
+    database: mnemom
+    username: mnemom
+    # -- Password for the internal PostgreSQL instance
+    password: ""
+    existingSecret: ""
+
+# -------------------------------------------------------------------
+# Database migration job
+# -------------------------------------------------------------------
+migration:
+  # -- Run database migrations as a Helm hook
+  enabled: true
+  image:
+    # -- Migration image repository (defaults to main image)
+    repository: ""
+    # -- Migration image tag (defaults to main image tag)
+    tag: ""
+  # -- Migration command override
+  command: []
+  # -- Migration args override
+  args:
+    - "migrate"
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+# -------------------------------------------------------------------
+# Prometheus metrics / ServiceMonitor
+# -------------------------------------------------------------------
+metrics:
+  # -- Enable Prometheus ServiceMonitor
+  serviceMonitor:
+    enabled: false
+    # -- Additional labels for the ServiceMonitor
+    labels: {}
+    # -- Scrape interval
+    interval: "30s"
+    # -- Scrape path
+    path: /metrics
+    # -- Scrape port name
+    port: http
+
+# -------------------------------------------------------------------
+# Pod security
+# -------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -------------------------------------------------------------------
+# Horizontal Pod Autoscaler
+# -------------------------------------------------------------------
+hpa:
+  # -- Enable HPA for the gateway deployment
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  # -- Target average CPU utilisation (%)
+  targetCPU: 70
+  # -- Target average memory utilisation (%) — leave empty to disable
+  targetMemory: ""
+
+# -------------------------------------------------------------------
+# Pod Disruption Budget
+# -------------------------------------------------------------------
+pdb:
+  # -- Enable PDB for the gateway deployment
+  enabled: true
+  # -- Minimum number of available pods
+  minAvailable: 1
+
+# -------------------------------------------------------------------
+# Network Policy
+# -------------------------------------------------------------------
+networkPolicy:
+  # -- Enable network policy
+  enabled: true
+
+# -------------------------------------------------------------------
+# Service Account
+# -------------------------------------------------------------------
+serviceAccount:
+  # -- Create a service account
+  create: true
+  # -- Annotations for the service account (e.g. AWS IRSA, GCP Workload Identity)
+  annotations: {}
+  # -- Override the service account name
+  name: ""
+
+# -------------------------------------------------------------------
+# Scheduling
+# -------------------------------------------------------------------
+topologySpreadConstraints: []
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

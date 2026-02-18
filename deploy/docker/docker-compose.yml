@@ -1,0 +1,126 @@
+version: "3.9"
+
+# =============================================================================
+# smoltbot Self-Hosted Gateway — Docker Compose Stack
+# =============================================================================
+# Brings up PostgreSQL, Redis, runs migrations, and starts the gateway
+# and observer (scheduler) services.
+#
+# Quick start:
+#   cp .env.example .env   # edit with your keys
+#   docker compose up -d
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: smoltbot
+      POSTGRES_USER: smoltbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smoltbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 (append-only persistence)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Database migrations (one-shot init container)
+  # ---------------------------------------------------------------------------
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.migrate
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: smoltbot
+      PGUSER: smoltbot
+      PGPASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Gateway — Hono HTTP server (port 8787)
+  # ---------------------------------------------------------------------------
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.gateway
+    environment:
+      SMOLTBOT_ROLE: gateway
+      SUPABASE_URL: http://postgres:5432
+      SUPABASE_KEY: ${SUPABASE_KEY}
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MNEMOM_LICENSE_JWT: ${MNEMOM_LICENSE_JWT}
+      MNEMOM_ANALYZE_URL: ${MNEMOM_ANALYZE_URL:-}
+      MNEMOM_API_KEY: ${MNEMOM_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      OTLP_AUTH: ${OTLP_AUTH:-}
+      PORT: "8787"
+    ports:
+      - "${PORT:-8787}:8787"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Observer — background scheduler process
+  # ---------------------------------------------------------------------------
+  observer:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.gateway
+    environment:
+      SMOLTBOT_ROLE: scheduler
+      SUPABASE_URL: http://postgres:5432
+      SUPABASE_KEY: ${SUPABASE_KEY}
+      REDIS_URL: redis://redis:6379
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MNEMOM_LICENSE_JWT: ${MNEMOM_LICENSE_JWT}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      OTLP_AUTH: ${OTLP_AUTH:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,0 +1,63 @@
+# =============================================================================
+# smoltbot Self-Hosted Gateway — Multi-stage Docker Build
+# =============================================================================
+# Produces a minimal Node.js runtime image for the Hono HTTP gateway.
+# Build context must be the repository root (context: ../..).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Install production dependencies
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS deps
+WORKDIR /app
+
+# Copy only package manifests so the install layer is cached independently
+COPY deploy/runtime/package.json deploy/runtime/package-lock.json* ./deploy/runtime/
+COPY gateway/package.json gateway/package-lock.json* ./gateway/
+COPY observer/package.json observer/package-lock.json* ./observer/
+COPY api/package.json api/package-lock.json* ./api/
+
+RUN cd deploy/runtime && npm ci --production
+
+# ---------------------------------------------------------------------------
+# Stage 2: Compile TypeScript
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS build
+WORKDIR /app
+
+COPY --from=deps /app/deploy/runtime/node_modules ./deploy/runtime/node_modules
+COPY deploy/runtime/ ./deploy/runtime/
+COPY gateway/ ./gateway/
+COPY observer/ ./observer/
+COPY api/ ./api/
+
+RUN cd deploy/runtime && npx tsc
+
+# ---------------------------------------------------------------------------
+# Stage 3: Production runtime
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS runtime
+
+# tini ensures proper PID 1 signal handling
+RUN apk add --no-cache tini
+
+WORKDIR /app
+
+COPY --from=deps  /app/deploy/runtime/node_modules ./node_modules
+COPY --from=build /app/deploy/runtime/dist          ./dist
+COPY --from=build /app/gateway/src                   ./gateway/src
+COPY --from=build /app/observer/src                  ./observer/src
+COPY --from=build /app/api/src                       ./api/src
+
+# Run as the nobody user (65534) — never as root
+USER 65534:65534
+
+ENV NODE_ENV=production
+ENV PORT=8787
+EXPOSE 8787
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:8787/health/live || exit 1
+
+ENTRYPOINT ["tini", "--"]
+CMD ["node", "dist/entrypoint.js"]

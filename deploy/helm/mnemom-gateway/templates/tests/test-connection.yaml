@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "mnemom-gateway.fullname" . }}-test-connection"
+  labels:
+    {{- include "mnemom-gateway.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl-test
+      image: curlimages/curl:8.5.0
+      command:
+        - sh
+        - -c
+        - |
+          echo "Testing liveness endpoint..."
+          curl --fail --silent --show-error \
+            "http://{{ include "mnemom-gateway.fullname" . }}:{{ .Values.service.port }}/health/live"
+          echo ""
+          echo "Testing readiness endpoint..."
+          curl --fail --silent --show-error \
+            "http://{{ include "mnemom-gateway.fullname" . }}:{{ .Values.service.port }}/health/ready"
+          echo ""
+          echo "All health checks passed."

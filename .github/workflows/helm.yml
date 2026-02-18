@@ -1,0 +1,30 @@
+name: Helm Lint
+
+on:
+  push:
+    paths:
+      - 'deploy/helm/**'
+  pull_request:
+    paths:
+      - 'deploy/helm/**'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint deploy/helm/mnemom-gateway/
+
+      - name: Template chart
+        run: |
+          helm template test deploy/helm/mnemom-gateway/ \
+            --set secrets.supabaseKey=test \
+            --set secrets.anthropicApiKey=test \
+            --set secrets.licenseJwt=test \
+            --debug
