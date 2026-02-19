@@ -429,6 +429,28 @@ describe('handleAnthropicProxy', () => {
       json: () => Promise.resolve([existingAgent]),
     });
 
+    // Quota context RPC (always called for agent_settings)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
+    });
+
     // Forward request — must be a real Response so .text() works
     mockFetch.mockResolvedValueOnce(
       new Response(JSON.stringify({ id: 'msg_123' }), {
@@ -450,9 +472,9 @@ describe('handleAnthropicProxy', () => {
     await handleAnthropicProxy(request, env, ctx);
 
     // Verify forward request was made
-    // Calls: 1) agent lookup, 2) forward to CF gateway
-    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
-    const forwardCall = mockFetch.mock.calls[1];
+    // Calls: 1) agent lookup, 2) quota context RPC, 3) forward to CF gateway
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(3);
+    const forwardCall = mockFetch.mock.calls[2];
     expect(forwardCall[0].url).toContain(env.CF_AI_GATEWAY_URL);
   });
 
@@ -467,6 +489,28 @@ describe('handleAnthropicProxy', () => {
       json: () => Promise.resolve([existingAgent]),
     });
 
+    // Quota context RPC (always called for agent_settings)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
+    });
+
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -483,7 +527,7 @@ describe('handleAnthropicProxy', () => {
 
     await handleAnthropicProxy(request, env, ctx);
 
-    const forwardCall = mockFetch.mock.calls[1];
+    const forwardCall = mockFetch.mock.calls[2];
     expect(forwardCall[0].url).toBe(`${env.CF_AI_GATEWAY_URL}/anthropic/v1/messages`);
   });
 
@@ -498,6 +542,28 @@ describe('handleAnthropicProxy', () => {
       json: () => Promise.resolve([existingAgent]),
     });
 
+    // Quota context RPC (always called for agent_settings)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
+    });
+
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -514,7 +580,7 @@ describe('handleAnthropicProxy', () => {
 
     await handleAnthropicProxy(request, env, ctx);
 
-    const forwardCall = mockFetch.mock.calls[1];
+    const forwardCall = mockFetch.mock.calls[2];
     const forwardRequest = forwardCall[0] as Request;
     const metadataHeader = forwardRequest.headers.get('cf-aig-metadata');
 
@@ -534,6 +600,28 @@ describe('handleAnthropicProxy', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve([existingAgent]),
+    });
+
+    // Quota context RPC (always called for agent_settings)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
     });
 
     // Must be a real Response so .text() works when the AIP pipeline buffers it
@@ -562,6 +650,28 @@ describe('handleAnthropicProxy', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve([existingAgent]),
+    });
+
+    // Quota context RPC (always called for agent_settings)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
     });
 
     mockFetch.mockResolvedValueOnce({
@@ -611,6 +721,28 @@ describe('handleAnthropicProxy', () => {
       json: () => Promise.resolve([existingAgent]),
     });
 
+    // Quota context RPC (always called for agent_settings)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
+    });
+
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -627,7 +759,7 @@ describe('handleAnthropicProxy', () => {
 
     await handleAnthropicProxy(request, env, ctx);
 
-    const forwardCall = mockFetch.mock.calls[1];
+    const forwardCall = mockFetch.mock.calls[2];
     expect(forwardCall[0].url).toContain('?stream=true');
   });
 });
@@ -732,6 +864,28 @@ describe('Request handler integration', () => {
       json: () => Promise.resolve([existingAgent]),
     });
 
+    // Quota context RPC (always called for agent_settings)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
+    });
+
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -765,6 +919,28 @@ describe('Request handler integration', () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve([{ id: 'agent-123' }]),
+    });
+
+    // Quota context RPC (always called for agent_settings)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
     });
 
     mockFetch.mockResolvedValueOnce({
@@ -1546,7 +1722,29 @@ describe('Billing enforcement integration', () => {
       json: () => Promise.resolve([existingAgent]),
     });
 
-    // Forward request (no quota calls should happen)
+    // Quota context RPC (always called now for agent_settings feature gating)
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        plan_id: 'plan-free',
+        billing_model: 'none',
+        subscription_status: 'none',
+        included_checks: 0,
+        check_count_this_period: 0,
+        overage_threshold: null,
+        per_check_price: 0,
+        feature_flags: {},
+        limits: {},
+        account_id: null,
+        current_period_end: null,
+        past_due_since: null,
+        is_suspended: false,
+        agent_settings: null,
+        per_proof_price: 0,
+      }),
+    });
+
+    // Forward request
     mockFetch.mockResolvedValueOnce(
       new Response(JSON.stringify({ id: 'msg_789' }), {
         status: 200,
@@ -1566,16 +1764,13 @@ describe('Billing enforcement integration', () => {
 
     const response = await handler.fetch(request, env, ctx);
 
-    // Should succeed without any billing checks
+    // Should succeed without billing enforcement
     expect(response.status).toBe(200);
-    // Only 2 fetch calls: agent lookup + forward (no billing RPC)
-    // (waitUntil calls are background and don't count for synchronous assertions)
+    // resolve_mnemom_api_key should NOT be called (gated on billingEnabled)
     expect(mockFetch.mock.calls.filter(
       (call: any[]) => call[0]?.toString().includes('resolve_mnemom_api_key')
     )).toHaveLength(0);
-    expect(mockFetch.mock.calls.filter(
-      (call: any[]) => call[0]?.toString().includes('get_quota_context_for_agent')
-    )).toHaveLength(0);
+    // get_quota_context_for_agent IS called (always, for agent_settings feature gating)
   });
 
   it('should include usage warning headers when quota is approaching', async () => {
