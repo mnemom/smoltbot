@@ -86,7 +86,13 @@ describe('processWebhookEvent', () => {
       mockFetch.mockResolvedValueOnce(mockResponse({ id: 'email_123' }));
       // 7. Log email
       mockFetch.mockResolvedValueOnce(mockResponse([], 201));
-      // 8. Update webhook event status
+      // 8. enrollInSequence: email_sequences insert
+      mockFetch.mockResolvedValueOnce(mockResponse([], 201));
+      // 9. enrollInSequence: billing_events log
+      mockFetch.mockResolvedValueOnce(mockResponse([], 201));
+      // 10. cancelSequence: supabasePatch
+      mockFetch.mockResolvedValueOnce(mockResponse([]));
+      // 11. Update webhook event status
       mockFetch.mockResolvedValueOnce(mockResponse([]));
 
       await processWebhookEvent(event, mockEnv);
@@ -127,7 +133,15 @@ describe('processWebhookEvent', () => {
       mockFetch.mockResolvedValueOnce(mockResponse({ id: 'email_456' }));
       // 6. Log email
       mockFetch.mockResolvedValueOnce(mockResponse([], 201));
-      // 7. Update webhook event status
+      // 7. enrollInSequence: email_sequences insert
+      mockFetch.mockResolvedValueOnce(mockResponse([], 201));
+      // 8. enrollInSequence: billing_events log
+      mockFetch.mockResolvedValueOnce(mockResponse([], 201));
+      // 9. emitWebhookEvent: emit_webhook_event RPC
+      mockFetch.mockResolvedValueOnce(mockResponse([]));
+      // 10. emitWebhookEvent: get_pending_webhook_deliveries
+      mockFetch.mockResolvedValueOnce(mockResponse([]));
+      // 11. Update webhook event status
       mockFetch.mockResolvedValueOnce(mockResponse([]));
 
       await processWebhookEvent(event, mockEnv);

@@ -897,6 +897,14 @@ describe('webhook-handler', () => {
       mockFetch.mockResolvedValueOnce(jsonOk({ id: 'resend-1' }));
       // Log email
       mockFetch.mockResolvedValueOnce(jsonOk({}));
+      // enrollInSequence: email_sequences insert
+      mockFetch.mockResolvedValueOnce(jsonOk([]));
+      // enrollInSequence: billing_events log
+      mockFetch.mockResolvedValueOnce(jsonOk({}));
+      // emitWebhookEvent: emit_webhook_event RPC
+      mockFetch.mockResolvedValueOnce(jsonOk({}));
+      // emitWebhookEvent: get_pending_webhook_deliveries
+      mockFetch.mockResolvedValueOnce(jsonOk([]));
       // Mark processed
       mockFetch.mockResolvedValueOnce(jsonOk([]));
 

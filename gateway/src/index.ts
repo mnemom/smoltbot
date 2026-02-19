@@ -32,6 +32,17 @@ import {
 } from '@mnemom/agent-integrity-protocol';
 
 import { createWorkersExporter } from '@mnemom/aip-otel-exporter/workers';
+import {
+  signCheckpoint as ed25519Sign,
+  computeInputCommitment,
+  loadSigningKeyFromHex,
+  computeChainHash,
+  computeLeafHash,
+  buildTreeState,
+  generateInclusionProof,
+  buildSignedPayload,
+  generateCertificateId,
+} from './attestation';
 
 // ============================================================================
 // Types
@@ -57,6 +68,9 @@ export interface Env {
   MNEMOM_ANALYZE_URL?: string;          // e.g. "https://api.mnemom.ai/v1/analyze"
   MNEMOM_API_KEY?: string;              // mnm_xxx key with analyze scope
   MNEMOM_LICENSE_JWT?: string;          // Enterprise license JWT
+  // Phase 1 VIE: Ed25519 checkpoint attestation
+  ED25519_SIGNING_KEY?: string;         // 64-char hex secret key
+  ED25519_KEY_ID?: string;              // Key identifier (e.g. "key-001")
 }
 
 interface Agent {
@@ -695,13 +709,123 @@ async function fetchRecentCheckpoints(
 }
 
 /**
+ * Attestation data attached to a checkpoint when Ed25519 signing is configured.
+ */
+interface AttestationData {
+  input_commitment: string;
+  chain_hash: string;
+  prev_chain_hash: string | null;
+  merkle_leaf_index: number | null;
+  certificate_id: string;
+  signature: string;
+  signing_key_id: string;
+}
+
+/**
+ * Fetch the previous chain hash for an agent+session via Supabase RPC.
+ * Returns null if no previous checkpoint exists (genesis case).
+ */
+async function fetchPrevChainHash(
+  agentId: string,
+  sessionId: string,
+  env: Env
+): Promise<string | null> {
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/rpc/get_prev_chain_hash`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          p_agent_id: agentId,
+          p_session_id: sessionId,
+        }),
+      }
+    );
+    if (!response.ok) return null;
+    const data = await response.json();
+    return (data as string) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch existing Merkle tree state for an agent via Supabase RPC.
+ * Returns the leaf hashes array, or empty array if no tree exists.
+ */
+async function fetchMerkleTreeLeaves(
+  agentId: string,
+  env: Env
+): Promise<string[]> {
+  try {
+    const response = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/rpc/get_merkle_tree`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ p_agent_id: agentId }),
+      }
+    );
+    if (!response.ok) return [];
+    const data = await response.json();
+    const rows = Array.isArray(data) ? data : [];
+    if (rows.length === 0) return [];
+    return (rows[0] as Record<string, unknown>)?.leaf_hashes as string[] || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Upsert Merkle tree state in Supabase (fire-and-forget).
+ */
+function upsertMerkleTree(
+  agentId: string,
+  root: string,
+  depth: number,
+  leafCount: number,
+  leafHash: string,
+  env: Env
+): void {
+  fetch(
+    `${env.SUPABASE_URL}/rest/v1/rpc/upsert_merkle_tree`,
+    {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        p_agent_id: agentId,
+        p_merkle_root: root,
+        p_tree_depth: depth,
+        p_leaf_count: leafCount,
+        p_leaf_hash: leafHash,
+      }),
+    }
+  ).catch(() => { /* fail-open */ });
+}
+
+/**
  * Store checkpoint to Supabase.
  * Same upsert pattern as the observer's submitCheckpoint.
+ * Optionally includes attestation data when Ed25519 signing is configured.
  */
 async function storeCheckpoint(
   checkpoint: IntegrityCheckpoint,
   source: string,
-  env: Env
+  env: Env,
+  attestation?: AttestationData
 ): Promise<void> {
   try {
     const response = await fetch(
@@ -731,6 +855,15 @@ async function storeCheckpoint(
           analysis_metadata: checkpoint.analysis_metadata,
           linked_trace_id: checkpoint.linked_trace_id,
           source,
+          ...(attestation ? {
+            input_commitment: attestation.input_commitment,
+            issuer_signature: attestation.signature,
+            signing_key_id: attestation.signing_key_id,
+            chain_hash: attestation.chain_hash,
+            prev_chain_hash: attestation.prev_chain_hash,
+            merkle_leaf_index: attestation.merkle_leaf_index,
+            certificate_id: attestation.certificate_id,
+          } : {}),
         }),
       }
     );
@@ -1743,6 +1876,17 @@ export async function handleProviderProxy(
             responseHeaders.set('X-AIP-Proceed', String(hybridProceed));
             responseHeaders.set('X-AIP-Source', 'hybrid');
 
+            // Pass through attestation data from hybrid API response
+            const hybridAttestation = hybridResult.attestation as Record<string, unknown> | undefined;
+            if (hybridAttestation) {
+              if (hybridAttestation.certificate_id) {
+                responseHeaders.set('X-AIP-Certificate-Id', String(hybridAttestation.certificate_id));
+              }
+              if (hybridAttestation.chain_hash) {
+                responseHeaders.set('X-AIP-Chain-Hash', String(hybridAttestation.chain_hash));
+              }
+            }
+
             if (enforcementMode === 'enforce' && hybridCheckpoint.verdict === 'boundary_violation') {
               return new Response(
                 JSON.stringify({
@@ -1897,14 +2041,113 @@ export async function handleProviderProxy(
         summary.drift_alert_active = true;
       }
 
+      // ====================================================================
+      // Phase 1 VIE: Cryptographic Checkpoint Attestation
+      // ====================================================================
+      let attestation: AttestationData | undefined;
+      const attestationEnabled = quotaContext.feature_flags.cryptographic_attestation !== false;
+      try {
+        const signingKeyHex = env.ED25519_SIGNING_KEY;
+        if (signingKeyHex && attestationEnabled) {
+          const signingKeyId = env.ED25519_KEY_ID || 'key-001';
+
+          // 1. Compute input commitment over analysis inputs
+          const inputCommitment = await computeInputCommitment({
+            card: aipCard as unknown as { card_id: string; values: unknown[]; [key: string]: unknown },
+            conscienceValues: (values || []) as Array<{ type: string; content: string; id?: string }>,
+            windowContext: window.getState().checkpoints.map((cp: IntegrityCheckpoint) => ({
+              checkpoint_id: cp.checkpoint_id,
+              verdict: cp.verdict,
+              reasoning_summary: cp.reasoning_summary,
+            })),
+            modelVersion: 'claude-haiku-4-5-20251001',
+            promptTemplateVersion: '1.0.0',
+          });
+
+          // 2. Fetch previous chain hash (genesis if first checkpoint)
+          const prevChainHash = await fetchPrevChainHash(agent.id, sessionId, env);
+
+          // 3. Compute chain hash linking to previous checkpoint
+          const chainHash = await computeChainHash({
+            prevChainHash,
+            checkpointId: checkpoint.checkpoint_id,
+            verdict: checkpoint.verdict,
+            thinkingBlockHash: thinkingHash,
+            inputCommitment,
+            timestamp: checkpoint.timestamp,
+          });
+
+          // 4. Build canonical payload and sign with Ed25519
+          const signedPayload = buildSignedPayload({
+            checkpointId: checkpoint.checkpoint_id,
+            agentId: checkpoint.agent_id,
+            verdict: checkpoint.verdict,
+            thinkingBlockHash: thinkingHash,
+            inputCommitment,
+            chainHash,
+            timestamp: checkpoint.timestamp,
+          });
+          const secretKey = loadSigningKeyFromHex(signingKeyHex);
+          const signatureValue = await ed25519Sign(signedPayload, secretKey);
+
+          // 5. Merkle tree update — append leaf and recompute root
+          const leafHash = computeLeafHash({
+            checkpointId: checkpoint.checkpoint_id,
+            verdict: checkpoint.verdict,
+            thinkingBlockHash: thinkingHash,
+            chainHash,
+            timestamp: checkpoint.timestamp,
+          });
+          const existingLeaves = await fetchMerkleTreeLeaves(agent.id, env);
+          const allLeaves = [...existingLeaves, leafHash];
+          const newTreeState = buildTreeState(allLeaves);
+          const merkleLeafIndex = allLeaves.length - 1;
+
+          // Fire-and-forget: update Merkle tree in DB
+          upsertMerkleTree(
+            agent.id,
+            newTreeState.root,
+            newTreeState.depth,
+            newTreeState.leafCount,
+            leafHash,
+            env
+          );
+
+          // 6. Generate certificate ID
+          const certificateId = generateCertificateId();
+
+          attestation = {
+            input_commitment: inputCommitment,
+            chain_hash: chainHash,
+            prev_chain_hash: prevChainHash,
+            merkle_leaf_index: merkleLeafIndex,
+            certificate_id: certificateId,
+            signature: signatureValue,
+            signing_key_id: signingKeyId,
+          };
+
+          console.log(
+            `[gateway/attestation] Checkpoint ${checkpoint.checkpoint_id} attested ` +
+            `(cert: ${certificateId}, chain: ${chainHash.slice(0, 12)}...)`
+          );
+        }
+      } catch (attestError) {
+        // Attestation is fail-open — never block the primary analysis pipeline
+        console.warn('[gateway/attestation] Attestation failed (fail-open):', attestError);
+      }
+
       // Set AIP headers
       responseHeaders.set('X-AIP-Verdict', checkpoint.verdict);
       responseHeaders.set('X-AIP-Checkpoint-Id', checkpoint.checkpoint_id);
       responseHeaders.set('X-AIP-Action', signal.recommended_action);
       responseHeaders.set('X-AIP-Proceed', String(signal.proceed));
+      if (attestation) {
+        responseHeaders.set('X-AIP-Certificate-Id', attestation.certificate_id);
+        responseHeaders.set('X-AIP-Chain-Hash', attestation.chain_hash);
+      }
 
-      // Background: store checkpoint, deliver webhooks, meter, flush OTel
-      ctx.waitUntil(storeCheckpoint(checkpoint, 'gateway', env));
+      // Background: store checkpoint (with attestation), deliver webhooks, meter, flush OTel
+      ctx.waitUntil(storeCheckpoint(checkpoint, 'gateway', env, attestation));
       ctx.waitUntil(submitMeteringEvent(agent.id, checkpoint.checkpoint_id, 'gateway', env));
       ctx.waitUntil(deliverWebhooks(checkpoint, env));
       if (otelExporter) {
@@ -2126,7 +2369,7 @@ export default {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
           'Access-Control-Allow-Headers': 'Content-Type, x-api-key, anthropic-version, anthropic-beta, authorization, x-goog-api-key, x-mnemom-api-key',
-          'Access-Control-Expose-Headers': 'x-smoltbot-agent, x-smoltbot-session, X-AIP-Verdict, X-AIP-Checkpoint-Id, X-AIP-Action, X-AIP-Proceed, X-AIP-Synthetic, X-Mnemom-Usage-Warning, X-Mnemom-Usage-Percent',
+          'Access-Control-Expose-Headers': 'x-smoltbot-agent, x-smoltbot-session, X-AIP-Verdict, X-AIP-Checkpoint-Id, X-AIP-Action, X-AIP-Proceed, X-AIP-Synthetic, X-AIP-Certificate-Id, X-AIP-Chain-Hash, X-Mnemom-Usage-Warning, X-Mnemom-Usage-Percent',
           'Access-Control-Max-Age': '86400',
         },
       });

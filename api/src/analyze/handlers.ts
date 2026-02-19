@@ -21,6 +21,10 @@ import {
   type AlignmentCard,
 } from '@mnemom/agent-integrity-protocol';
 import type { AnalyzeRequest, AnalyzeResponse } from './types';
+import { signCheckpoint, computeInputCommitment, loadSigningKeyFromHex, uint8ToHex, getPublicKeyFromSecret } from './signing';
+import { computeChainHash } from './chain';
+import { computeLeafHash, computeMerkleRoot, generateInclusionProof, buildTreeState } from './merkle';
+import { buildCertificate, buildSignedPayload, generateCertificateId } from './certificate';
 
 // ============================================
 // Response helpers
@@ -86,6 +90,28 @@ async function supabaseInsert(
         Prefer: 'return=representation',
       },
       body: JSON.stringify(data),
+    });
+    if (!response.ok) {
+      return { data: null, error: await response.text() };
+    }
+    return { data: await response.json(), error: null };
+  } catch (err) {
+    return { data: null, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}
+
+async function supabaseQuery(
+  env: BillingEnv,
+  table: string,
+  query: string,
+): Promise<{ data: unknown; error: string | null }> {
+  try {
+    const response = await fetch(`${env.SUPABASE_URL}/rest/v1/${table}?${query}`, {
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
     });
     if (!response.ok) {
       return { data: null, error: await response.text() };
@@ -455,6 +481,111 @@ async function processAnalysis(
   const summary = windowManager.getSummary();
   const signal = buildSignal(checkpoint, summary);
 
+  // ---- Attestation (Phase 1: Cryptographic Checkpoint Attestation) ----
+  let attestation: AnalyzeResponse['attestation'] | undefined;
+  try {
+    const signingKeyHex = (env as unknown as Record<string, string>).ED25519_SIGNING_KEY;
+    if (signingKeyHex) {
+      const signingKeyId = (env as unknown as Record<string, string>).ED25519_KEY_ID || 'key-001';
+
+      // 1. Compute input commitment
+      const inputCommitment = await computeInputCommitment({
+        card: body.card,
+        conscienceValues: (body.conscience_values || []) as Array<{ type: string; content: string; id?: string }>,
+        windowContext: body.window_context || [],
+        modelVersion: 'claude-haiku-4-5-20251001',
+        promptTemplateVersion: '1.0.0',
+      });
+
+      // 2. Get previous chain hash
+      const { data: prevData } = await supabaseRpc(env, 'get_prev_chain_hash', {
+        p_agent_id: body.agent_id,
+        p_session_id: body.session_id,
+      });
+      const prevChainHash = (prevData as string) || null;
+
+      // 3. Compute chain hash
+      const chainHash = await computeChainHash({
+        prevChainHash,
+        checkpointId: checkpoint.checkpoint_id,
+        verdict: checkpoint.verdict,
+        thinkingBlockHash: thinkingHash,
+        inputCommitment,
+        timestamp: checkpoint.timestamp,
+      });
+
+      // 4. Build and sign payload
+      const signedPayload = buildSignedPayload({
+        checkpointId: checkpoint.checkpoint_id,
+        agentId: checkpoint.agent_id,
+        verdict: checkpoint.verdict,
+        thinkingBlockHash: thinkingHash,
+        inputCommitment,
+        chainHash,
+        timestamp: checkpoint.timestamp,
+      });
+      const secretKey = loadSigningKeyFromHex(signingKeyHex);
+      const signatureValue = await signCheckpoint(signedPayload, secretKey);
+
+      // 5. Merkle tree update
+      const leafHash = computeLeafHash({
+        checkpointId: checkpoint.checkpoint_id,
+        verdict: checkpoint.verdict,
+        thinkingBlockHash: thinkingHash,
+        chainHash,
+        timestamp: checkpoint.timestamp,
+      });
+
+      // Fetch existing tree state
+      const { data: treeData } = await supabaseRpc(env, 'get_merkle_tree', {
+        p_agent_id: body.agent_id,
+      });
+      const existingTree = Array.isArray(treeData) && treeData.length > 0 ? treeData[0] as Record<string, unknown> : null;
+      const existingLeaves = (existingTree?.leaf_hashes as string[]) || [];
+      const allLeaves = [...existingLeaves, leafHash];
+      const newTreeState = buildTreeState(allLeaves);
+      const merkleLeafIndex = allLeaves.length - 1;
+
+      // Update tree in DB (non-blocking)
+      supabaseRpc(env, 'upsert_merkle_tree', {
+        p_agent_id: body.agent_id,
+        p_merkle_root: newTreeState.root,
+        p_tree_depth: newTreeState.depth,
+        p_leaf_count: newTreeState.leafCount,
+        p_leaf_hash: leafHash,
+      }).catch(() => { /* fail-open */ });
+
+      // 6. Build certificate
+      const certificateId = generateCertificateId();
+
+      // Generate inclusion proof if tree has enough leaves
+      let merkleData: Parameters<typeof buildCertificate>[0]['merkleData'] = null;
+      if (allLeaves.length > 0) {
+        const proof = generateInclusionProof(allLeaves, merkleLeafIndex);
+        merkleData = {
+          leafHash: proof.leafHash,
+          leafIndex: proof.leafIndex,
+          root: proof.root,
+          treeSize: proof.treeSize,
+          inclusionProof: proof.siblings,
+        };
+      }
+
+      attestation = {
+        input_commitment: inputCommitment,
+        chain_hash: chainHash,
+        prev_chain_hash: prevChainHash,
+        merkle_leaf_index: merkleLeafIndex,
+        certificate_id: certificateId,
+        signature: signatureValue,
+        signing_key_id: signingKeyId,
+      };
+    }
+  } catch {
+    // Attestation is fail-open — never block the primary analysis
+    console.warn('[analyze] Attestation failed; continuing without attestation');
+  }
+
   // Store checkpoint if requested (non-blocking)
   if (body.store_checkpoint) {
     try {
@@ -473,6 +604,15 @@ async function processAnalysis(
         window_position: checkpoint.window_position,
         analysis_metadata: checkpoint.analysis_metadata,
         source: 'hybrid_api',
+        ...(attestation ? {
+          input_commitment: attestation.input_commitment,
+          issuer_signature: attestation.signature,
+          signing_key_id: attestation.signing_key_id,
+          chain_hash: attestation.chain_hash,
+          prev_chain_hash: attestation.prev_chain_hash,
+          merkle_leaf_index: attestation.merkle_leaf_index,
+          certificate_id: attestation.certificate_id,
+        } : {}),
       });
     } catch {
       console.warn('[analyze] Failed to store checkpoint');
@@ -518,6 +658,22 @@ async function processAnalysis(
     } catch {
       // Fail-open: never block the primary operation
     }
+
+    // Request ZK proof (non-blocking, fail-open)
+    try {
+      if (attestation) {
+        const { shouldProve, requestProof } = await import('./proving');
+        if (shouldProve(checkpoint)) {
+          requestProof(env, checkpoint.checkpoint_id, {
+            analysis_response_text: analysisResponseText,
+            thinking_block_hash: thinkingHash,
+            card_hash: (await sha256(JSON.stringify(body.card))),
+            values_hash: (await sha256(JSON.stringify(body.conscience_values || []))),
+            model: body.thinking_metadata.model,
+          }, attestation).catch(() => { /* fail-open */ });
+        }
+      }
+    } catch { /* fail-open */ }
   }
 
   // Meter (non-blocking, fail-open)
@@ -548,6 +704,7 @@ async function processAnalysis(
         account_id: accountId,
         billed: true,
       },
+      ...(attestation ? { attestation } : {}),
     },
   };
 }

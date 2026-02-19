@@ -38,6 +38,12 @@
  * - GET /v1/admin/agents - Admin agent listing with integrity summaries
  * - GET /v1/admin/costs - Admin cost breakdown by model
  * - POST /v1/agents/:id/reverify/aip - Re-evaluate AIP checkpoints against updated card
+ * - GET /v1/keys - Public signing keys for verification
+ * - POST /v1/verify - Verify an integrity certificate
+ * - GET /v1/checkpoints/:id/certificate - Get full integrity certificate
+ * - GET /v1/checkpoints/:id/inclusion-proof - Get Merkle inclusion proof
+ * - GET /v1/agents/:id/merkle-root - Get agent's Merkle tree root
+ * - GET /v1/agents/topology - Trust topology graph (gated: trust_topology)
  */
 
 import { detectDrift, verifyTrace, type APTrace, type AlignmentCard } from '@mnemom/agent-alignment-protocol';
@@ -126,6 +132,15 @@ import {
   handleAnalyzeBatch,
 } from './analyze/handlers';
 import {
+  handleGetKeys,
+  handleGetCertificate,
+  handleVerifyCertificate,
+  handleGetMerkleRoot,
+  handleGetInclusionProof,
+  handleRequestProof,
+  handleGetProof,
+} from './analyze/verification-handlers';
+import {
   handleRegisterDeployment,
   handleListOrgDeployments,
   handleGetDeployment,
@@ -161,6 +176,8 @@ export interface Env {
   HUBSPOT_API_KEY?: string;
   SLACK_WEBHOOK_URL?: string;
   BILLING_CACHE?: KVNamespace;
+  PROVER_URL?: string;
+  PROVER_API_KEY?: string;
 }
 
 // CORS headers for all responses
@@ -4442,6 +4459,90 @@ export default {
       // POST /v1/analyze/batch
       if (path === '/v1/analyze/batch' && method === 'POST') {
         return handleAnalyzeBatch(env as unknown as BillingEnv, request);
+      }
+
+      // ============================================
+      // VERIFICATION & ATTESTATION ROUTES
+      // ============================================
+
+      // GET /v1/keys (public — active signing keys)
+      if (path === '/v1/keys' && method === 'GET') {
+        return handleGetKeys(env as unknown as BillingEnv);
+      }
+
+      // POST /v1/verify (public — verify an integrity certificate)
+      if (path === '/v1/verify' && method === 'POST') {
+        return handleVerifyCertificate(env as unknown as BillingEnv, request);
+      }
+
+      // GET /v1/checkpoints/:id/certificate
+      const certMatch = path.match(/^\/v1\/checkpoints\/([^/]+)\/certificate$/);
+      if (certMatch && method === 'GET') {
+        return handleGetCertificate(env as unknown as BillingEnv, certMatch[1]);
+      }
+
+      // GET /v1/checkpoints/:id/inclusion-proof
+      const proofMatch = path.match(/^\/v1\/checkpoints\/([^/]+)\/inclusion-proof$/);
+      if (proofMatch && method === 'GET') {
+        return handleGetInclusionProof(env as unknown as BillingEnv, proofMatch[1]);
+      }
+
+      // POST /v1/checkpoints/:id/prove (request ZK proof — gated: on_demand_proving)
+      const proveMatch = path.match(/^\/v1\/checkpoints\/([^/]+)\/prove$/);
+      if (proveMatch && method === 'POST') {
+        const user = await getAuthUser(request, env);
+        if (user) {
+          const gateResponse = await requireFeature(env as unknown as BillingEnv, user.sub, 'on_demand_proving');
+          if (gateResponse) return gateResponse;
+        }
+        return handleRequestProof(env as unknown as BillingEnv, proveMatch[1]);
+      }
+
+      // GET /v1/checkpoints/:id/proof (get proof status — gated: zk_proofs)
+      const proofStatusMatch = path.match(/^\/v1\/checkpoints\/([^/]+)\/proof$/);
+      if (proofStatusMatch && method === 'GET') {
+        const user = await getAuthUser(request, env);
+        if (user) {
+          const gateResponse = await requireFeature(env as unknown as BillingEnv, user.sub, 'zk_proofs');
+          if (gateResponse) return gateResponse;
+        }
+        return handleGetProof(env as unknown as BillingEnv, proofStatusMatch[1]);
+      }
+
+      // GET /v1/agents/:id/merkle-root
+      const merkleMatch = path.match(/^\/v1\/agents\/([^/]+)\/merkle-root$/);
+      if (merkleMatch && method === 'GET') {
+        return handleGetMerkleRoot(env as unknown as BillingEnv, merkleMatch[1]);
+      }
+
+      // GET /v1/agents/topology (gated: trust_topology)
+      if (path === '/v1/agents/topology' && method === 'GET') {
+        const user = await getAuthUser(request, env);
+        if (!user) return errorResponse('Authentication required', 401);
+        const gateResponse = await requireFeature(env as unknown as BillingEnv, user.sub, 'trust_topology');
+        if (gateResponse) return gateResponse;
+
+        // Fetch all agents linked to this user with their integrity data
+        const agentsResp = await fetch(
+          `${env.SUPABASE_URL}/rest/v1/rpc/get_user_agents_topology`,
+          {
+            method: 'POST',
+            headers: {
+              apikey: env.SUPABASE_KEY,
+              Authorization: `Bearer ${env.SUPABASE_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ p_user_id: user.sub }),
+          },
+        );
+
+        if (!agentsResp.ok) {
+          // Fallback: return empty topology
+          return jsonResponse({ nodes: [], edges: [] });
+        }
+
+        const topology = await agentsResp.json();
+        return jsonResponse(topology);
       }
 
       // ============================================

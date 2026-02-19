@@ -467,7 +467,7 @@ describe('handleAdminExportRevenue', () => {
   it('should return CSV with correct content-type', async () => {
     const env = makeEnv();
     mockQueryResponse([
-      { event_id: 'be-1', account_id: 'ba-1', event_type: 'payment_succeeded', details: { amount_cents: 5000 }, created_at: '2026-01-15' },
+      { event_id: 'be-1', account_id: 'ba-1', event_type: 'payment_succeeded', details: { amount_cents: 5000 }, timestamp: '2026-01-15' },
     ]);
     mockMutationResponse(); // Audit log
 
@@ -480,7 +480,7 @@ describe('handleAdminExportRevenue', () => {
     expect(response.headers.get('Content-Disposition')).toContain('revenue-');
 
     const text = await response.text();
-    expect(text).toContain('event_id,account_id,event_type,amount_cents,created_at');
+    expect(text).toContain('event_id,account_id,event_type,amount_cents,timestamp');
     expect(text).toContain('be-1');
   });
 });

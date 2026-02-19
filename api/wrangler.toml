@@ -16,6 +16,10 @@ workers_dev = true
 # RESEND_API_KEY         (Resend email API key)
 # ANTHROPIC_API_KEY      (Anthropic API key for analysis LLM)
 # LICENSE_SIGNING_SECRET (HMAC secret for license JWT signing)
+# ED25519_SIGNING_KEY    (Ed25519 private key, hex-encoded, for checkpoint attestation)
+# ED25519_KEY_ID         (Key ID for signing key, e.g. "key-001")
+# PROVER_URL             (URL of the ZK proving service, e.g. "https://prover.fly.dev")
+# PROVER_API_KEY          (API key for the ZK proving service)
 
 # Billing/rate-limit cache — create with: wrangler kv:namespace create BILLING_CACHE
 # Then fill in the id below.

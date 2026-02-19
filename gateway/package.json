@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "@mnemom/agent-integrity-protocol": "^0.1.7",
-    "@mnemom/aip-otel-exporter": "^0.1.0"
+    "@mnemom/aip-otel-exporter": "^0.1.0",
+    "@noble/ed25519": "^3.0.0",
+    "@noble/hashes": "^2.0.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240117.0",

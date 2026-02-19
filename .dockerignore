@@ -1,0 +1,8 @@
+**/node_modules
+**/target
+**/.git
+**/dist
+**/.next
+**/.turbo
+**/.cache
+*.log
