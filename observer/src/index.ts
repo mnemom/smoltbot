@@ -1610,9 +1610,10 @@ async function reportDailyUsageToStripe(env: Env): Promise<void> {
       httpClient: Stripe.createFetchHttpClient(),
     });
 
-    // Fetch accounts with active metered subscriptions
+    // Fetch accounts with active metered subscriptions (checks and/or proofs)
+    // Include stripe_customer_id for meter events API (proofs)
     const accountsResponse = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/billing_accounts?subscription_status=in.(active,trialing)&stripe_subscription_item_id=not.is.null&select=account_id,stripe_subscription_item_id,check_count_this_period`,
+      `${env.SUPABASE_URL}/rest/v1/billing_accounts?subscription_status=in.(active,trialing)&stripe_subscription_item_id=not.is.null&select=account_id,stripe_customer_id,stripe_subscription_item_id,check_count_this_period,stripe_proof_subscription_item_id,proof_count_this_period`,
       {
         headers: {
           apikey: env.SUPABASE_KEY,
@@ -1628,30 +1629,54 @@ async function reportDailyUsageToStripe(env: Env): Promise<void> {
 
     const accounts = (await accountsResponse.json()) as Array<{
       account_id: string;
+      stripe_customer_id: string;
       stripe_subscription_item_id: string;
       check_count_this_period: number;
+      stripe_proof_subscription_item_id: string | null;
+      proof_count_this_period: number;
     }>;
 
     const today = new Date().toISOString().split('T')[0];
     let reported = 0;
 
-    for (const account of accounts) {
-      const quantity = account.check_count_this_period || 0;
-      const idempotencyKey = `${account.account_id}-${today}`;
+    // Fetch today's proof counts from usage_daily_rollup for meter event reporting.
+    // Meter events are incremental (each event adds to total), so we send daily counts
+    // rather than cumulative period totals.
+    const proofRollupResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/usage_daily_rollup?date=eq.${today}&proof_count=gt.0&select=account_id,proof_count`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+    const dailyProofCounts = new Map<string, number>();
+    if (proofRollupResponse.ok) {
+      const rows = (await proofRollupResponse.json()) as Array<{ account_id: string; proof_count: number }>;
+      for (const row of rows) {
+        dailyProofCounts.set(row.account_id, row.proof_count);
+      }
+    }
 
+    for (const account of accounts) {
       try {
+        const checkQuantity = account.check_count_this_period || 0;
+        const checkIdempotencyKey = `${account.account_id}-checks-${today}`;
+
+        // Report check usage via legacy createUsageRecord (cumulative, action:'set')
         await (stripe as any).subscriptionItems.createUsageRecord(
           account.stripe_subscription_item_id,
           {
-            quantity,
+            quantity: checkQuantity,
             timestamp: Math.floor(Date.now() / 1000),
             action: 'set',
           },
-          { idempotencyKey }
+          { idempotencyKey: checkIdempotencyKey }
         );
 
-        // Record in stripe_usage_reports
-        const reportId = `sur-${crypto.randomUUID().slice(0, 8)}`;
+        // Record check usage in stripe_usage_reports
+        const checkReportId = `sur-${crypto.randomUUID().slice(0, 8)}`;
         await fetch(`${env.SUPABASE_URL}/rest/v1/stripe_usage_reports`, {
           method: 'POST',
           headers: {
@@ -1661,15 +1686,54 @@ async function reportDailyUsageToStripe(env: Env): Promise<void> {
             Prefer: 'return=minimal',
           },
           body: JSON.stringify({
-            id: reportId,
+            id: checkReportId,
             account_id: account.account_id,
             stripe_subscription_item_id: account.stripe_subscription_item_id,
-            reported_quantity: quantity,
-            idempotency_key: idempotencyKey,
+            reported_quantity: checkQuantity,
+            idempotency_key: checkIdempotencyKey,
           }),
         });
 
-        // Log billing event
+        // Report proof usage via Stripe Meter Events API (incremental, daily count).
+        // The proof price is linked to a Stripe Meter (event_name: 'zk_proof'),
+        // which requires meter events instead of createUsageRecord.
+        let proofQuantity = 0;
+        const dailyProofCount = dailyProofCounts.get(account.account_id) || 0;
+        if (dailyProofCount > 0 && account.stripe_customer_id) {
+          proofQuantity = dailyProofCount;
+          const proofIdentifier = `${account.account_id}-proofs-${today}`;
+
+          await (stripe as any).billing.meterEvents.create({
+            event_name: 'zk_proof',
+            payload: {
+              stripe_customer_id: account.stripe_customer_id,
+              value: String(proofQuantity),
+            },
+            identifier: proofIdentifier,
+            timestamp: Math.floor(Date.now() / 1000),
+          });
+
+          // Record proof usage in stripe_usage_reports
+          const proofReportId = `sur-${crypto.randomUUID().slice(0, 8)}`;
+          await fetch(`${env.SUPABASE_URL}/rest/v1/stripe_usage_reports`, {
+            method: 'POST',
+            headers: {
+              apikey: env.SUPABASE_KEY,
+              Authorization: `Bearer ${env.SUPABASE_KEY}`,
+              'Content-Type': 'application/json',
+              Prefer: 'return=minimal',
+            },
+            body: JSON.stringify({
+              id: proofReportId,
+              account_id: account.account_id,
+              stripe_subscription_item_id: account.stripe_proof_subscription_item_id || 'meter_event',
+              reported_quantity: proofQuantity,
+              idempotency_key: proofIdentifier,
+            }),
+          });
+        }
+
+        // Log billing event (combined check + proof report)
         const eventId = `be-${crypto.randomUUID().slice(0, 8)}`;
         await fetch(`${env.SUPABASE_URL}/rest/v1/billing_events`, {
           method: 'POST',
@@ -1683,7 +1747,15 @@ async function reportDailyUsageToStripe(env: Env): Promise<void> {
             event_id: eventId,
             account_id: account.account_id,
             event_type: 'usage_reported',
-            details: { quantity, date: today, idempotency_key: idempotencyKey },
+            details: {
+              check_quantity: checkQuantity,
+              proof_quantity: proofQuantity,
+              date: today,
+              check_idempotency_key: checkIdempotencyKey,
+              proof_identifier: proofQuantity > 0
+                ? `${account.account_id}-proofs-${today}`
+                : null,
+            },
             performed_by: 'observer_cron',
             timestamp: new Date().toISOString(),
           }),
