@@ -2045,7 +2045,7 @@ export async function handleProviderProxy(
       // Phase 1 VIE: Cryptographic Checkpoint Attestation
       // ====================================================================
       let attestation: AttestationData | undefined;
-      const attestationEnabled = quotaContext.feature_flags.cryptographic_attestation !== false;
+      const attestationEnabled = true;
       try {
         const signingKeyHex = env.ED25519_SIGNING_KEY;
         if (signingKeyHex && attestationEnabled) {
