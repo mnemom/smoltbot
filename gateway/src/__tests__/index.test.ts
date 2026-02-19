@@ -978,6 +978,7 @@ describe('evaluateQuota', () => {
       current_period_end: '2026-03-15T00:00:00Z',
       past_due_since: null,
       is_suspended: false,
+      containment_status: 'active',
       ...overrides,
     };
   }
@@ -1125,6 +1126,50 @@ describe('evaluateQuota', () => {
       billing_model: 'none',
       subscription_status: 'none',
       is_suspended: true,
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('account_suspended');
+  });
+
+  // --- Containment tests ---
+
+  it('should reject paused agent', () => {
+    const decision = evaluateQuota(makeContext({
+      containment_status: 'paused',
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('agent_paused');
+  });
+
+  it('should reject killed agent', () => {
+    const decision = evaluateQuota(makeContext({
+      containment_status: 'killed',
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('agent_killed');
+  });
+
+  it('should reject paused free-tier agent', () => {
+    const decision = evaluateQuota(makeContext({
+      plan_id: 'plan-free',
+      billing_model: 'none',
+      containment_status: 'paused',
+    }));
+    expect(decision.action).toBe('reject');
+    expect(decision.reason).toBe('agent_paused');
+  });
+
+  it('should allow active agent', () => {
+    const decision = evaluateQuota(makeContext({
+      containment_status: 'active',
+    }));
+    expect(decision.action).toBe('allow');
+  });
+
+  it('should check containment after suspension (suspended takes priority)', () => {
+    const decision = evaluateQuota(makeContext({
+      is_suspended: true,
+      containment_status: 'paused',
     }));
     expect(decision.action).toBe('reject');
     expect(decision.reason).toBe('account_suspended');

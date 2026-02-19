@@ -120,6 +120,7 @@ export interface QuotaContext {
   is_suspended: boolean;
   agent_settings: AgentSettings | null;
   per_proof_price: number;
+  containment_status: 'active' | 'paused' | 'killed';
 }
 
 export interface QuotaDecision {
@@ -145,6 +146,7 @@ export const FREE_TIER_CONTEXT: QuotaContext = {
   is_suspended: false,
   agent_settings: null,
   per_proof_price: 0,
+  containment_status: 'active',
 };
 
 // ============================================================================
@@ -221,6 +223,15 @@ export function evaluateQuota(context: QuotaContext): QuotaDecision {
     return {
       action: 'reject',
       reason: 'account_suspended',
+      headers,
+    };
+  }
+
+  // Contained agents are blocked — checked before billing logic
+  if (context.containment_status === 'paused' || context.containment_status === 'killed') {
+    return {
+      action: 'reject',
+      reason: `agent_${context.containment_status}`,
       headers,
     };
   }
@@ -1651,13 +1662,14 @@ export async function handleProviderProxy(
       quotaDecision = evaluateQuota(quotaContext);
 
       if (quotaDecision.action === 'reject') {
+        const isContainment = quotaDecision.reason === 'agent_paused' || quotaDecision.reason === 'agent_killed';
         return new Response(JSON.stringify({
-          error: 'Request blocked by billing policy',
-          type: 'billing_error',
+          error: isContainment ? 'Agent contained' : 'Request blocked by billing policy',
+          type: isContainment ? 'containment_error' : 'billing_error',
           reason: quotaDecision.reason,
-          usage_percent: quotaDecision.usage_percent,
+          ...(quotaDecision.usage_percent !== undefined && { usage_percent: quotaDecision.usage_percent }),
         }), {
-          status: 402,
+          status: isContainment ? 403 : 402,
           headers: { 'Content-Type': 'application/json', ...quotaDecision.headers },
         });
       }

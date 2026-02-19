@@ -421,6 +421,11 @@ async function processLog(
     if (aipSignal.checkpoint.verdict === 'boundary_violation') {
       ctx.waitUntil(createNudgeIfEnabled(aipSignal.checkpoint, agent_id, session_id, env));
     }
+
+    // Auto-containment: check if consecutive boundary violations exceed threshold
+    if (aipSignal.checkpoint.verdict === 'boundary_violation') {
+      ctx.waitUntil(checkAutoContainment(agent_id, session_id, aipSignal.checkpoint, env));
+    }
   }
 
   // Check for behavioral drift (runs in background)
@@ -1421,6 +1426,129 @@ async function runIntegrityCheck(
     if (client) {
       client.destroy();
     }
+  }
+}
+
+/**
+ * Check if an agent should be auto-contained based on consecutive boundary violations.
+ * Fire-and-forget via ctx.waitUntil() — failure never blocks the observer pipeline.
+ */
+async function checkAutoContainment(
+  agentId: string,
+  sessionId: string,
+  checkpoint: IntegrityCheckpoint,
+  env: Env
+): Promise<void> {
+  try {
+    // Fetch agent's auto-containment threshold and current status
+    const agentRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=auto_containment_threshold,containment_status`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!agentRes.ok) return;
+
+    const agents = (await agentRes.json()) as Array<Record<string, unknown>>;
+    if (agents.length === 0) return;
+
+    const agent = agents[0];
+    const threshold = agent.auto_containment_threshold as number | null;
+    const currentStatus = agent.containment_status as string;
+
+    // Skip if auto-containment disabled or agent already contained
+    if (!threshold || currentStatus === 'paused' || currentStatus === 'killed') return;
+
+    // Count consecutive boundary_violation checkpoints for this agent (most recent first)
+    // Using gaps-and-islands: count from the latest checkpoint backwards until a non-violation
+    const checkpointRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&order=created_at.desc&limit=${threshold + 5}&select=verdict`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!checkpointRes.ok) return;
+
+    const checkpoints = (await checkpointRes.json()) as Array<{ verdict: string }>;
+
+    // Count consecutive boundary_violations from the start
+    let consecutiveCount = 0;
+    for (const cp of checkpoints) {
+      if (cp.verdict === 'boundary_violation') {
+        consecutiveCount++;
+      } else {
+        break;
+      }
+    }
+
+    if (consecutiveCount < threshold) return;
+
+    console.log(`[observer/containment] Auto-pausing agent ${agentId}: ${consecutiveCount} consecutive boundary violations (threshold: ${threshold})`);
+
+    // Auto-pause the agent
+    const now = new Date().toISOString();
+    const reason = `Auto-contained: ${consecutiveCount} consecutive boundary violations`;
+
+    const updateUrl = new URL(`${env.SUPABASE_URL}/rest/v1/agents`);
+    updateUrl.searchParams.set('id', `eq.${agentId}`);
+
+    await fetch(updateUrl.toString(), {
+      method: 'PATCH',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        containment_status: 'paused',
+        contained_at: now,
+        contained_by: 'system',
+        containment_reason: reason,
+      }),
+    });
+
+    // Insert containment audit log
+    const logId = `ctl-${Array.from(crypto.getRandomValues(new Uint8Array(6))).map(b => b.toString(16).padStart(2, '0')).join('')}`;
+
+    await fetch(`${env.SUPABASE_URL}/rest/v1/agent_containment_log`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        id: logId,
+        agent_id: agentId,
+        action: 'auto_pause',
+        actor: 'system',
+        reason,
+        previous_status: currentStatus,
+        new_status: 'paused',
+        metadata: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id }),
+      }),
+    });
+
+    // Purge KV cache if available
+    // Note: observer may not have BILLING_CACHE bound — this is best-effort
+    if ((env as any).BILLING_CACHE) {
+      await ((env as any).BILLING_CACHE as KVNamespace).delete(`quota:agent:${agentId}`).catch(() => {});
+    }
+
+    console.log(`[observer/containment] Agent ${agentId} auto-paused successfully`);
+  } catch (err) {
+    // Fail-open: auto-containment failure never blocks the observer
+    console.warn('[observer/containment] checkAutoContainment error (fail-open):', err);
   }
 }
 
