@@ -97,6 +97,13 @@ interface AlignmentCard {
 // Quota Enforcement Types
 // ============================================================================
 
+export interface AgentSettings {
+  aap_enabled: boolean;
+  aip_enabled: boolean;
+  proof_enabled: boolean;
+  proof_rate: number;
+}
+
 export interface QuotaContext {
   plan_id: string;
   billing_model: string;       // 'none' | 'metered' | 'subscription' | 'subscription_plus_metered'
@@ -111,6 +118,8 @@ export interface QuotaContext {
   current_period_end: string | null;
   past_due_since: string | null;
   is_suspended: boolean;
+  agent_settings: AgentSettings | null;
+  per_proof_price: number;
 }
 
 export interface QuotaDecision {
@@ -134,6 +143,8 @@ export const FREE_TIER_CONTEXT: QuotaContext = {
   current_period_end: null,
   past_due_since: null,
   is_suspended: false,
+  agent_settings: null,
+  per_proof_price: 0,
 };
 
 // ============================================================================
@@ -1587,55 +1598,56 @@ export async function handleProviderProxy(
     );
 
     // ====================================================================
-    // Mnemom API Key Validation + Quota Enforcement (pre-forward)
+    // Quota Resolution (always — needed for agent_settings even without billing)
     // ====================================================================
     const billingEnabled = (env.BILLING_ENFORCEMENT_ENABLED ?? 'false') === 'true';
     let quotaDecision: QuotaDecision | null = null;
+    let mnemomKeyHash: string | undefined;
+
+    // Check for Mnemom API key (billing identity, separate from LLM key)
+    const mnemomKey = request.headers.get('x-mnemom-api-key');
+
+    if (billingEnabled && mnemomKey) {
+      mnemomKeyHash = await hashMnemomApiKey(mnemomKey);
+
+      // Validate the Mnemom API key via RPC
+      try {
+        const keyResponse = await fetch(
+          `${env.SUPABASE_URL}/rest/v1/rpc/resolve_mnemom_api_key`,
+          {
+            method: 'POST',
+            headers: {
+              apikey: env.SUPABASE_KEY,
+              Authorization: `Bearer ${env.SUPABASE_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ p_key_hash: mnemomKeyHash }),
+          },
+        );
+
+        if (keyResponse.ok) {
+          const keyResult = (await keyResponse.json()) as { valid: boolean; account_id?: string };
+          if (!keyResult.valid) {
+            return new Response(JSON.stringify({
+              error: 'Invalid Mnemom API key',
+              type: 'authentication_error',
+            }), {
+              status: 401,
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
+        }
+      } catch (err) {
+        // Fail-open: log and continue without key validation
+        console.warn('[gateway] Mnemom API key validation failed (fail-open):', err);
+      }
+    }
+
+    // Always resolve quota context — agent_settings needed for feature gating
+    const quotaContext = await resolveQuotaContext(agent.id, env, mnemomKeyHash);
+    const agentSettings = quotaContext.agent_settings;
 
     if (billingEnabled) {
-      // Check for Mnemom API key (billing identity, separate from LLM key)
-      const mnemomKey = request.headers.get('x-mnemom-api-key');
-      let mnemomKeyHash: string | undefined;
-      let resolvedAccountId: string | undefined;
-
-      if (mnemomKey) {
-        mnemomKeyHash = await hashMnemomApiKey(mnemomKey);
-
-        // Validate the Mnemom API key via RPC
-        try {
-          const keyResponse = await fetch(
-            `${env.SUPABASE_URL}/rest/v1/rpc/resolve_mnemom_api_key`,
-            {
-              method: 'POST',
-              headers: {
-                apikey: env.SUPABASE_KEY,
-                Authorization: `Bearer ${env.SUPABASE_KEY}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ p_key_hash: mnemomKeyHash }),
-            },
-          );
-
-          if (keyResponse.ok) {
-            const keyResult = (await keyResponse.json()) as { valid: boolean; account_id?: string };
-            if (!keyResult.valid) {
-              return new Response(JSON.stringify({
-                error: 'Invalid Mnemom API key',
-                type: 'authentication_error',
-              }), {
-                status: 401,
-                headers: { 'Content-Type': 'application/json' },
-              });
-            }
-            resolvedAccountId = keyResult.account_id;
-          }
-        } catch (err) {
-          // Fail-open: log and continue without key validation
-          console.warn('[gateway] Mnemom API key validation failed (fail-open):', err);
-        }
-      }
-
-      const quotaContext = await resolveQuotaContext(agent.id, env, mnemomKeyHash);
       quotaDecision = evaluateQuota(quotaContext);
 
       if (quotaDecision.action === 'reject') {
@@ -1738,12 +1750,17 @@ export async function handleProviderProxy(
       }
     }
 
-    // Update last_seen and ensure alignment card is current (background)
+    // Update last_seen (background)
     ctx.waitUntil(updateLastSeen(agent.id, env));
-    ctx.waitUntil(ensureAlignmentCard(agent.id, env));
 
-    // If AIP disabled, forward response unchanged
-    if (!aipEnabled) {
+    // Ensure alignment card only when AAP is enabled for this agent
+    if (agentSettings?.aap_enabled !== false) {
+      ctx.waitUntil(ensureAlignmentCard(agent.id, env));
+    }
+
+    // Skip AIP if globally disabled or disabled for this agent
+    const aipDisabledForAgent = agentSettings?.aip_enabled === false;
+    if (!aipEnabled || aipDisabledForAgent) {
       responseHeaders.set('X-AIP-Verdict', 'disabled');
       return new Response(response.body, {
         status: response.status,
@@ -2045,7 +2062,7 @@ export async function handleProviderProxy(
       // Phase 1 VIE: Cryptographic Checkpoint Attestation
       // ====================================================================
       let attestation: AttestationData | undefined;
-      const attestationEnabled = true;
+      const attestationEnabled = quotaContext.feature_flags?.cryptographic_attestation !== false;
       try {
         const signingKeyHex = env.ED25519_SIGNING_KEY;
         if (signingKeyHex && attestationEnabled) {
