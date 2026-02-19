@@ -31,3 +31,7 @@ id = "d13bd450c5ab4a2c9766f2dc26ce513c"
 # MNEMOM_ANALYZE_URL  (e.g. "https://api.mnemom.ai/v1/analyze")
 # MNEMOM_API_KEY      (mnm_ key with analyze scope)
 # MNEMOM_LICENSE_JWT  (Enterprise license JWT)
+
+# Phase 1 VIE: Ed25519 checkpoint attestation (set via wrangler secret put)
+# ED25519_SIGNING_KEY  (64-char hex Ed25519 secret key)
+# ED25519_KEY_ID       (Key identifier, e.g. "key-001")

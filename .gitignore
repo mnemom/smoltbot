@@ -5,6 +5,7 @@ node_modules/
 # Build artifacts
 dist/
 *.tsbuildinfo
+target/
 
 # Proxy
 proxy/package-lock.json
