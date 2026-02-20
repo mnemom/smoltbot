@@ -4,12 +4,11 @@
 
 FROM rust:1.85-bookworm AS builder
 
-# Prevent OOM on Fly remote builder:
-#   thin LTO — fraction of memory vs full LTO (the root cause)
-#   2 parallel jobs + 4 codegen units — cap peak memory
+# Fly remote builder has limited RAM — disable LTO entirely
+# (LTO loads full crate graph into memory during linking; unnecessary for a server binary)
 ENV CARGO_BUILD_JOBS=2
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
-ENV CARGO_PROFILE_RELEASE_LTO=thin
+ENV CARGO_PROFILE_RELEASE_LTO=off
 
 # Install RISC Zero toolchain
 RUN curl -L https://risczero.com/install | bash && \
