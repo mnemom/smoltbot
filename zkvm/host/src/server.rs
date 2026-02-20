@@ -168,19 +168,22 @@ async fn handle_prove(
                     "Proof completed"
                 );
 
-                let _ = sqlx::query(
-                    "SELECT complete_proof($1, $2, $3, $4, $5, $6, $7, $8)"
+                match sqlx::query(
+                    "SELECT complete_proof($1, $2, $3, $4, $5, $6::numeric, $7, $8)"
                 )
                 .bind(&proof_id)
                 .bind(&image_id_hex)
                 .bind(&receipt_bytes)
                 .bind(&journal_bytes)
                 .bind(duration_ms)
-                .bind(0.005f64) // estimated cost
+                .bind(0.005f64) // estimated cost — explicit ::numeric cast for sqlx
                 .bind(verified)
                 .bind(if verified { Some(chrono::Utc::now()) } else { None })
                 .execute(&db)
-                .await;
+                .await {
+                    Ok(_) => info!(proof_id = %proof_id, "Proof persisted to DB"),
+                    Err(e) => error!(proof_id = %proof_id, "Failed to persist proof: {}", e),
+                }
             }
             Err(e) => {
                 error!(proof_id = %proof_id, "Proving failed: {}", e);

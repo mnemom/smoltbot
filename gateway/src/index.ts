@@ -2228,14 +2228,12 @@ export async function handleProviderProxy(
             signing_key_id: signingKeyId,
           };
 
-          console.log(
-            `[gateway/attestation] Checkpoint ${checkpoint.checkpoint_id} attested ` +
-            `(cert: ${certificateId}, chain: ${chainHash.slice(0, 12)}...)`
-          );
+          console.log(`[attestation] ${checkpoint.checkpoint_id} cert=${certificateId}`);
         }
       } catch (attestError) {
         // Attestation is fail-open — never block the primary analysis pipeline
-        console.warn('[gateway/attestation] Attestation failed (fail-open):', attestError);
+        const errMsg = attestError instanceof Error ? `${attestError.message}\n${attestError.stack}` : String(attestError);
+        console.warn('[gateway/attestation] Attestation failed (fail-open):', errMsg);
       }
 
       // Set AIP headers
