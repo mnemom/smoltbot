@@ -50,23 +50,6 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Database migrations (one-shot init container)
-  # ---------------------------------------------------------------------------
-  migrate:
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile.migrate
-    environment:
-      PGHOST: postgres
-      PGPORT: "5432"
-      PGDATABASE: smoltbot
-      PGUSER: smoltbot
-      PGPASSWORD: ${POSTGRES_PASSWORD:-changeme}
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # ---------------------------------------------------------------------------
   # Gateway — Hono HTTP server (port 8787)
   # ---------------------------------------------------------------------------
   gateway:
@@ -91,8 +74,8 @@ services:
     ports:
       - "${PORT:-8787}:8787"
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -115,8 +98,8 @@ services:
       OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
       OTLP_AUTH: ${OTLP_AUTH:-}
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
