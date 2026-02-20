@@ -651,8 +651,8 @@ async function fetchAlignmentData(
       Authorization: `Bearer ${env.SUPABASE_KEY}`,
     };
 
-    // Fetch card + conscience values and enforcement mode in parallel
-    const [cardResponse, agentResponse] = await Promise.all([
+    // Fetch card + conscience values, enforcement mode, and org conscience values in parallel
+    const [cardResponse, agentResponse, orgCvResult] = await Promise.all([
       fetch(
         `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
         { headers: supabaseHeaders }
@@ -661,11 +661,12 @@ async function fetchAlignmentData(
         `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=aip_enforcement_mode&limit=1`,
         { headers: supabaseHeaders }
       ),
+      fetchOrgConscienceValuesForGateway(agentId, env),
     ]);
 
     // Parse card data
     let card: Record<string, any> | null = null;
-    let conscienceValues: ConscienceValue[] | null = null;
+    let perAgentValues: ConscienceValue[] | null = null;
     if (cardResponse.ok) {
       const cards = (await cardResponse.json()) as Array<{
         card_json: Record<string, any>;
@@ -673,7 +674,7 @@ async function fetchAlignmentData(
       }>;
       if (cards.length > 0) {
         card = cards[0].card_json || null;
-        conscienceValues = cards[0].conscience_values || null;
+        perAgentValues = cards[0].conscience_values || null;
       }
     } else {
       console.warn(`[gateway/aip] Failed to fetch card for ${agentId}: ${cardResponse.status}`);
@@ -690,10 +691,82 @@ async function fetchAlignmentData(
       }
     }
 
+    // Layered conscience values resolution:
+    // 1. Base: defaults (augment) or empty (replace)
+    // 2. Org layer: custom org values (always applied)
+    // 3. Agent layer: per-agent values from alignment card (additive)
+    let conscienceValues: ConscienceValue[] | null = null;
+    if (orgCvResult && orgCvResult.enabled && orgCvResult.values && orgCvResult.values.length > 0) {
+      if (orgCvResult.mode === 'replace') {
+        conscienceValues = orgCvResult.values.map((v: any) => ({ name: v.name, description: v.description, type: v.type }));
+      } else {
+        // augment: defaults + org values
+        conscienceValues = [
+          ...DEFAULT_CONSCIENCE_VALUES,
+          ...orgCvResult.values.map((v: any) => ({ name: v.name, description: v.description, type: v.type })),
+        ];
+      }
+      // Per-agent values are additive on top of org layer
+      if (perAgentValues && perAgentValues.length > 0) {
+        conscienceValues = [...conscienceValues, ...perAgentValues];
+      }
+    } else if (perAgentValues && perAgentValues.length > 0) {
+      // No org values, but per-agent values exist — use them with defaults
+      conscienceValues = perAgentValues;
+    }
+
     return { card, conscienceValues, enforcementMode };
   } catch (error) {
     console.error(`[gateway/aip] Error fetching alignment data for ${agentId}:`, error);
     return { card: null, conscienceValues: null, enforcementMode: 'observe' };
+  }
+}
+
+/**
+ * Fetch org-level conscience values for an agent.
+ * Uses KV cache (5-min TTL) → Supabase RPC. Fail-open: returns null on error.
+ */
+async function fetchOrgConscienceValuesForGateway(
+  agentId: string,
+  env: Env
+): Promise<{ enabled: boolean; mode?: string; values?: Array<{ name: string; description: string; type: string }> } | null> {
+  const cacheKey = `org-cv:agent:${agentId}`;
+  try {
+    // Check KV cache first
+    if (env.BILLING_CACHE) {
+      const cached = await env.BILLING_CACHE.get(cacheKey);
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    }
+
+    // Call RPC
+    const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/get_org_conscience_values_for_agent`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_agent_id: agentId }),
+    });
+
+    if (!response.ok) {
+      console.warn(`[gateway/cv] RPC failed for ${agentId}: ${response.status}`);
+      return { enabled: false };
+    }
+
+    const result = await response.json() as Record<string, unknown>;
+
+    // Cache for 5 minutes
+    if (env.BILLING_CACHE) {
+      await env.BILLING_CACHE.put(cacheKey, JSON.stringify(result), { expirationTtl: 300 }).catch(() => {});
+    }
+
+    return result as any;
+  } catch (error) {
+    console.warn('[gateway/cv] fetchOrgConscienceValues failed (fail-open):', error);
+    return { enabled: false };
   }
 }
 

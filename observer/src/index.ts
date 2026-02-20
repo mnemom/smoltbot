@@ -1331,9 +1331,62 @@ function extractAgentDescription(card: AlignmentCard): string | undefined {
 }
 
 /**
+ * Fetch org-level conscience values for an agent.
+ * Uses KV cache (5-min TTL) → Supabase RPC. Fail-open: returns null on error.
+ */
+async function fetchOrgConscienceValues(
+  agentId: string,
+  env: Env
+): Promise<{ enabled: boolean; mode?: string; values?: Array<{ name: string; description: string; type: string; severity: string }> } | null> {
+  const cacheKey = `org-cv:agent:${agentId}`;
+  try {
+    // Check KV cache first
+    if ((env as any).BILLING_CACHE) {
+      const cached = await ((env as any).BILLING_CACHE as KVNamespace).get(cacheKey);
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    }
+
+    // Call RPC
+    const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/get_org_conscience_values_for_agent`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_agent_id: agentId }),
+    });
+
+    if (!response.ok) {
+      console.warn(`[observer/cv] RPC failed for ${agentId}: ${response.status}`);
+      return { enabled: false };
+    }
+
+    const result = await response.json() as Record<string, unknown>;
+
+    // Cache for 5 minutes
+    if ((env as any).BILLING_CACHE) {
+      await ((env as any).BILLING_CACHE as KVNamespace).put(cacheKey, JSON.stringify(result), { expirationTtl: 300 }).catch(() => {});
+    }
+
+    return result as any;
+  } catch (error) {
+    console.warn('[observer/cv] fetchOrgConscienceValues failed (fail-open):', error);
+    return { enabled: false };
+  }
+}
+
+/**
  * Run an AIP integrity check on the response body.
  * Creates an ephemeral AIP client, runs the check, and destroys the client.
  * Fail-open: returns null on any error so existing processing is unaffected.
+ *
+ * Conscience values resolution (layered, additive):
+ * 1. Base: DEFAULT_CONSCIENCE_VALUES (augment mode) or empty (replace mode)
+ * 2. Org layer: Custom org values — always applied
+ * 3. Agent layer: Per-agent conscience_values from alignment card (additive)
  */
 async function runIntegrityCheck(
   responseBody: string,
@@ -1385,10 +1438,33 @@ async function runIntegrityCheck(
       },
     };
 
+    // Layered conscience values resolution
+    // 1. Base: defaults (augment) or empty (replace)
+    // 2. Org layer: custom org values (always applied)
+    // 3. Agent layer: per-agent values from alignment card (additive)
+    const orgCv = await fetchOrgConscienceValues(agentId, env);
+    let resolvedValues = [...DEFAULT_CONSCIENCE_VALUES];
+    if (orgCv && orgCv.enabled && orgCv.values && orgCv.values.length > 0) {
+      if (orgCv.mode === 'replace') {
+        resolvedValues = orgCv.values.map(v => ({ name: v.name, description: v.description, type: v.type as any }));
+      } else {
+        // augment: defaults + org values
+        resolvedValues = [
+          ...DEFAULT_CONSCIENCE_VALUES,
+          ...orgCv.values.map(v => ({ name: v.name, description: v.description, type: v.type as any })),
+        ];
+      }
+    }
+    // Per-agent values from alignment card are additive on top
+    const agentCv = (card as any)?.conscience_values;
+    if (Array.isArray(agentCv) && agentCv.length > 0) {
+      resolvedValues = [...resolvedValues, ...agentCv];
+    }
+
     // Note: initial_checkpoints will be a recognized AIPConfig field once AIP SDK v0.1.5 lands
     const config: AIPConfig & { initial_checkpoints?: any[] } = {
       card: aipCard,
-      conscience_values: [...DEFAULT_CONSCIENCE_VALUES],
+      conscience_values: resolvedValues,
       initial_checkpoints: initialCheckpoints,
       min_evidence_tokens: 25, // ~100 chars — analyze any real sentence of reasoning
       analysis_llm: {
