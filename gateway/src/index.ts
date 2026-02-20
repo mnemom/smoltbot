@@ -698,12 +698,12 @@ async function fetchAlignmentData(
     let conscienceValues: ConscienceValue[] | null = null;
     if (orgCvResult && orgCvResult.enabled && orgCvResult.values && orgCvResult.values.length > 0) {
       if (orgCvResult.mode === 'replace') {
-        conscienceValues = orgCvResult.values.map((v: any) => ({ name: v.name, description: v.description, type: v.type }));
+        conscienceValues = orgCvResult.values.map((v: any) => ({ id: v.name, content: v.description, type: v.type }));
       } else {
         // augment: defaults + org values
         conscienceValues = [
           ...DEFAULT_CONSCIENCE_VALUES,
-          ...orgCvResult.values.map((v: any) => ({ name: v.name, description: v.description, type: v.type })),
+          ...orgCvResult.values.map((v: any) => ({ id: v.name, content: v.description, type: v.type })),
         ];
       }
       // Per-agent values are additive on top of org layer

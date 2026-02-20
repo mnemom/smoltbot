@@ -1446,12 +1446,12 @@ async function runIntegrityCheck(
     let resolvedValues = [...DEFAULT_CONSCIENCE_VALUES];
     if (orgCv && orgCv.enabled && orgCv.values && orgCv.values.length > 0) {
       if (orgCv.mode === 'replace') {
-        resolvedValues = orgCv.values.map(v => ({ name: v.name, description: v.description, type: v.type as any }));
+        resolvedValues = orgCv.values.map(v => ({ id: v.name, content: v.description, type: v.type as any }));
       } else {
         // augment: defaults + org values
         resolvedValues = [
           ...DEFAULT_CONSCIENCE_VALUES,
-          ...orgCv.values.map(v => ({ name: v.name, description: v.description, type: v.type as any })),
+          ...orgCv.values.map(v => ({ id: v.name, content: v.description, type: v.type as any })),
         ];
       }
     }
