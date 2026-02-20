@@ -5,6 +5,10 @@
 
 FROM rust:1.82-bookworm AS builder
 
+# Limit parallel codegen units and link jobs to prevent OOM on constrained builders
+ENV CARGO_BUILD_JOBS=2
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
+
 # Install RISC Zero toolchain
 RUN curl -L https://risczero.com/install | bash && \
     /root/.risc0/bin/rzup install
