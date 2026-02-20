@@ -74,10 +74,11 @@ smoltbot/
 ├── cli/          # CLI tool (npm package)
 ├── gateway/      # Cloudflare Worker — API proxy + tracing
 ├── observer/     # Cloudflare Worker — trace builder + AAP verification
-├── api/          # Cloudflare Worker — REST API
-├── dashboard/    # React frontend (legacy, see mnemom-website)
-└── database/     # Supabase schema (Postgres)
+├── prover/       # ZK proving service (Fly.io)
+└── zkvm/         # Zero-knowledge VM (core, host, wasm-verifier)
 ```
+
+> **Note:** `api/` and `database/` have been extracted to the private [`mnemom/mnemom-api`](https://github.com/mnemom/mnemom-api) repository.
 
 ## Claiming Your Agent
 
@@ -144,8 +145,8 @@ Set enforcement mode via the API: `PUT /v1/agents/:id/enforcement` with `{"mode"
 
 Smoltbot is designed to run on Cloudflare Workers + Supabase. To self-host:
 
-1. Create a Supabase project and run `database/schema.sql`
-2. Deploy workers: `cd gateway && wrangler deploy`, `cd api && wrangler deploy`, `cd observer && wrangler deploy`
+1. Create a Supabase project and run the schema from [`mnemom-api`](https://github.com/mnemom/mnemom-api)
+2. Deploy workers: `cd gateway && wrangler deploy`, `cd observer && wrangler deploy`, and deploy the API from `mnemom-api`
 3. Set secrets on each worker via `wrangler secret put`
 4. Configure a Cloudflare AI Gateway and point the gateway worker to it
 5. Update the CLI's gateway URL: `smoltbot init --gateway=https://your-domain.com`

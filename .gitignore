@@ -40,6 +40,6 @@ logs/
 # Internal design docs
 architecture/
 
-# Database schema and migrations (private)
+# API and database moved to mnemom/mnemom-api (private)
+api/
 database/
-api/migrations/
