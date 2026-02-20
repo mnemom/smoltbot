@@ -4,26 +4,29 @@
 
 FROM rust:1.85-bookworm AS builder
 
-# Fly remote builder has limited RAM — disable LTO entirely
-# (LTO loads full crate graph into memory during linking; unnecessary for a server binary)
+# Fly remote builder has limited RAM:
+#   - LTO off: skip whole-program optimization during linking
+#   - mold linker: memory-mapped linking, uses fraction of RAM vs ld
+#   - 2 parallel jobs + 4 codegen units: cap peak memory
 ENV CARGO_BUILD_JOBS=2
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=4
 ENV CARGO_PROFILE_RELEASE_LTO=off
 
-# Install RISC Zero toolchain
-RUN curl -L https://risczero.com/install | bash && \
+# Install mold (fast, memory-efficient linker) and RISC Zero toolchain
+RUN apt-get update && apt-get install -y mold && rm -rf /var/lib/apt/lists/* && \
+    curl -L https://risczero.com/install | bash && \
     /root/.risc0/bin/rzup install
 
 # Copy workspace
 WORKDIR /app
 COPY zkvm/ ./zkvm/
 
-# Build guest ELF first (RISC-V cross-compilation)
+# Build guest ELF first (RISC-V cross-compilation — uses risc0's own linker, not mold)
 WORKDIR /app/zkvm
 RUN cargo build --release -p aip-zkvm-methods
 
-# Build host binary
-RUN cargo build --release -p aip-zkvm-host
+# Build host binary with mold linker (x86_64 target only)
+RUN RUSTFLAGS="-C link-arg=-fuse-ld=mold" cargo build --release -p aip-zkvm-host
 
 # Runtime
 FROM debian:bookworm-slim
