@@ -37,6 +37,7 @@ import {
   type IntegritySignal,
   type AIPConfig,
   type IntegrityCheckpoint,
+  type ConscienceValue,
 } from '@mnemom/agent-integrity-protocol';
 
 import { createWorkersExporter, type WorkersOTelExporter } from '@mnemom/aip-otel-exporter/workers';
@@ -1443,16 +1444,18 @@ async function runIntegrityCheck(
     // 2. Org layer: custom org values (always applied)
     // 3. Agent layer: per-agent values from alignment card (additive)
     const orgCv = await fetchOrgConscienceValues(agentId, env);
-    let resolvedValues = [...DEFAULT_CONSCIENCE_VALUES];
+    let resolvedValues: ConscienceValue[] = [...DEFAULT_CONSCIENCE_VALUES] as unknown as ConscienceValue[];
     if (orgCv && orgCv.enabled && orgCv.values && orgCv.values.length > 0) {
+      const mapped: ConscienceValue[] = orgCv.values.map(v => ({
+        id: v.name,
+        content: v.description,
+        type: v.type as ConscienceValue['type'],
+      }));
       if (orgCv.mode === 'replace') {
-        resolvedValues = orgCv.values.map(v => ({ id: v.name, content: v.description, type: v.type as any }));
+        resolvedValues = mapped;
       } else {
         // augment: defaults + org values
-        resolvedValues = [
-          ...DEFAULT_CONSCIENCE_VALUES,
-          ...orgCv.values.map(v => ({ id: v.name, content: v.description, type: v.type as any })),
-        ];
+        resolvedValues = [...(DEFAULT_CONSCIENCE_VALUES as unknown as ConscienceValue[]), ...mapped];
       }
     }
     // Per-agent values from alignment card are additive on top
