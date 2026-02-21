@@ -95,17 +95,6 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: observer
 
-  deploy-api:
-    name: Deploy API (MOVED)
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - name: API has moved
-        run: |
-          echo "::error::API deployment has moved to mnemom/mnemom-api."
-          echo "Deploy from: https://github.com/mnemom/mnemom-api/actions/workflows/deploy.yml"
-          exit 1
-
   deploy-prover:
     name: Deploy Prover
     runs-on: ubuntu-latest
