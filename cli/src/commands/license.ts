@@ -1,5 +1,6 @@
 import { loadConfig, saveConfig, configExists } from "../lib/config.js";
 import { API_BASE } from "../lib/api.js";
+import { fmt } from "../lib/format.js";
 
 /**
  * Decode a JWT payload without verifying the signature.
@@ -107,18 +108,17 @@ export async function licenseStatusCommand(): Promise<void> {
   const daysRemaining = expiresAt ? Math.floor((expiresAt.getTime() - Date.now()) / 86400000) : null;
   const isExpired = daysRemaining !== null && daysRemaining <= 0;
 
-  console.log("\n" + "=".repeat(50));
-  console.log("  Enterprise License Status");
-  console.log("=".repeat(50) + "\n");
-  console.log("  License ID:      " + (claims.license_id || "unknown"));
-  console.log("  Account:         " + (claims.account_id || "unknown"));
-  console.log("  Plan:            " + (claims.plan_id || "unknown"));
-  console.log("  Features:        " + Object.keys((claims.feature_flags as Record<string, boolean>) || {}).filter((k) => (claims.feature_flags as Record<string, boolean>)[k]).join(", ") || "none");
-  console.log("  Expires:         " + (expiresAt ? expiresAt.toISOString() : "unknown"));
-  console.log("  Days remaining:  " + (daysRemaining ?? "unknown"));
-  console.log("  Status:          " + (isExpired ? "EXPIRED" : "Active"));
-  console.log("  Max activations: " + (claims.max_activations || "unknown"));
-  console.log("  Offline mode:    " + (claims.is_offline ? "yes" : "no"));
+  console.log(fmt.header("Enterprise License Status"));
+  console.log();
+  console.log(`  ${fmt.label("License ID:     ", String(claims.license_id || "unknown"))}`);
+  console.log(`  ${fmt.label("Account:        ", String(claims.account_id || "unknown"))}`);
+  console.log(`  ${fmt.label("Plan:           ", String(claims.plan_id || "unknown"))}`);
+  console.log(`  ${fmt.label("Features:       ", Object.keys((claims.feature_flags as Record<string, boolean>) || {}).filter((k) => (claims.feature_flags as Record<string, boolean>)[k]).join(", ") || "none")}`);
+  console.log(`  ${fmt.label("Expires:        ", expiresAt ? expiresAt.toISOString() : "unknown")}`);
+  console.log(`  ${fmt.label("Days remaining: ", String(daysRemaining ?? "unknown"))}`);
+  console.log(`  ${fmt.label("Status:         ", isExpired ? "EXPIRED" : "Active")}`);
+  console.log(`  ${fmt.label("Max activations:", ` ${claims.max_activations || "unknown"}`)}`);
+  console.log(`  ${fmt.label("Offline mode:   ", claims.is_offline ? "yes" : "no")}`);
   console.log();
 
   if (isExpired) {

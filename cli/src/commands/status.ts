@@ -11,6 +11,7 @@ import {
 } from "../lib/openclaw.js";
 import { formatModelName, detectProvider } from "../lib/models.js";
 import { refreshModelCache } from "../lib/model-cache.js";
+import { fmt } from "../lib/format.js";
 
 const GATEWAY_URL = "https://gateway.mnemom.ai";
 const DASHBOARD_URL = "https://mnemom.ai";
@@ -35,9 +36,8 @@ const AIP_SUPPORT: Record<Provider, string> = {
 };
 
 export async function statusCommand(): Promise<void> {
-  console.log("\n" + "=".repeat(60));
-  console.log("  smoltbot status");
-  console.log("=".repeat(60) + "\n");
+  console.log(fmt.header("smoltbot status"));
+  console.log();
 
   const checks: StatusCheckResult[] = [];
 
@@ -77,13 +77,12 @@ export async function statusCommand(): Promise<void> {
   printChecks(checks);
 
   // Show configuration details
-  console.log("\n" + "─".repeat(50));
-  console.log("Configuration");
-  console.log("─".repeat(50) + "\n");
+  console.log(fmt.section("Configuration"));
+  console.log();
 
-  console.log(`Agent ID:  ${config.agentId}`);
-  console.log(`Gateway:   ${config.gateway || GATEWAY_URL}`);
-  console.log(`Dashboard: ${DASHBOARD_URL}/agents/${config.agentId}`);
+  console.log(fmt.label("Agent ID: ", config.agentId));
+  console.log(fmt.label("Gateway:  ", config.gateway || GATEWAY_URL));
+  console.log(fmt.label("Dashboard:", ` ${DASHBOARD_URL}/agents/${config.agentId}`));
 
   if (config.mnemomApiKey) {
     const prefix = config.mnemomApiKey.slice(0, 8);
@@ -127,16 +126,16 @@ export async function statusCommand(): Promise<void> {
   const hasErrors = checks.some((c) => c.status === "error");
   const hasWarnings = checks.some((c) => c.status === "warning");
 
-  console.log("\n" + "=".repeat(60));
   if (hasErrors) {
-    console.log("  Status: ISSUES DETECTED");
-    console.log("\n  Fix the errors above to ensure tracing works correctly.");
+    console.log("\n" + fmt.header("Status: ISSUES DETECTED"));
+    console.log("\n  Fix the errors above to ensure tracing works correctly.\n");
   } else if (hasWarnings) {
-    console.log("  Status: OK (with warnings)");
+    console.log("\n" + fmt.header("Status: OK (with warnings)"));
+    console.log();
   } else {
-    console.log("  Status: ALL SYSTEMS GO");
+    console.log("\n" + fmt.header("Status: ALL SYSTEMS GO"));
+    console.log();
   }
-  console.log("=".repeat(60) + "\n");
 
   // Refresh model cache in background (non-blocking)
   refreshModelCache().catch(() => {});
@@ -293,9 +292,8 @@ function showProviderSummary(): void {
   const configuredProviders = getSmoltbotConfiguredProviders();
   if (configuredProviders.length === 0) return;
 
-  console.log("\n" + "─".repeat(50));
-  console.log("Configured Providers");
-  console.log("─".repeat(50) + "\n");
+  console.log(fmt.section("Configured Providers"));
+  console.log();
 
   for (const provider of configuredProviders) {
     const label = PROVIDER_LABELS[provider];
@@ -402,9 +400,8 @@ async function showTraceSummary(agentId: string): Promise<void> {
       getTraces(agentId, 1),
     ]);
 
-    console.log("\n" + "─".repeat(50));
-    console.log("Trace Summary");
-    console.log("─".repeat(50) + "\n");
+    console.log(fmt.section("Trace Summary"));
+    console.log();
 
     if (integrityResult.status === "fulfilled") {
       const integrity = integrityResult.value;
@@ -432,14 +429,17 @@ async function showTraceSummary(agentId: string): Promise<void> {
 }
 
 function printChecks(checks: StatusCheckResult[]): void {
-  console.log("System Checks");
-  console.log("─".repeat(50) + "\n");
+  console.log(fmt.section("System Checks"));
+  console.log();
 
   for (const check of checks) {
-    const icon =
-      check.status === "ok" ? "✓" : check.status === "warning" ? "⚠" : "✗";
-
-    console.log(`${icon} ${check.name}: ${check.message}`);
+    if (check.status === "ok") {
+      console.log(fmt.success(`${check.name}: ${check.message}`));
+    } else if (check.status === "warning") {
+      console.log(fmt.warn(`${check.name}: ${check.message}`));
+    } else {
+      console.log(fmt.error(`${check.name}: ${check.message}`));
+    }
     if (check.details) {
       console.log(`    ${check.details}`);
     }

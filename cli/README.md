@@ -40,6 +40,9 @@ That's it. `smoltbot init` detects your configured AI provider API keys (Anthrop
 | `smoltbot status` | Show agent status, providers, and connection info |
 | `smoltbot integrity` | Display integrity score and verification stats |
 | `smoltbot logs [-l N]` | Show recent traces and actions |
+| `smoltbot card show` | Display active alignment card |
+| `smoltbot card publish <file>` | Publish alignment card from JSON file |
+| `smoltbot card validate <file>` | Validate card JSON locally |
 
 ## How It Works
 

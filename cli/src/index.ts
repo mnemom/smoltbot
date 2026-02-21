@@ -7,6 +7,7 @@ import { integrityCommand } from "./commands/integrity.js";
 import { logsCommand } from "./commands/logs.js";
 import { claimCommand } from "./commands/claim.js";
 import { licenseActivateCommand, licenseStatusCommand, licenseDeactivateCommand } from "./commands/license.js";
+import { cardShowCommand, cardPublishCommand, cardValidateCommand } from "./commands/card.js";
 
 program
   .name("smoltbot")
@@ -118,6 +119,48 @@ license
   .action(async () => {
     try {
       await licenseDeactivateCommand();
+    } catch (error) {
+      console.error("Error:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+const cardCmd = program
+  .command("card")
+  .description("Manage alignment card");
+
+cardCmd
+  .command("show")
+  .description("Display active alignment card")
+  .action(async () => {
+    try {
+      await cardShowCommand();
+    } catch (error) {
+      console.error("Error:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+cardCmd
+  .command("publish")
+  .argument("<file>", "Path to card JSON file")
+  .description("Publish alignment card from JSON file")
+  .action(async (file: string) => {
+    try {
+      await cardPublishCommand(file);
+    } catch (error) {
+      console.error("Error:", error instanceof Error ? error.message : error);
+      process.exit(1);
+    }
+  });
+
+cardCmd
+  .command("validate")
+  .argument("<file>", "Path to card JSON file")
+  .description("Validate card JSON locally")
+  .action(async (file: string) => {
+    try {
+      await cardValidateCommand(file);
     } catch (error) {
       console.error("Error:", error instanceof Error ? error.message : error);
       process.exit(1);

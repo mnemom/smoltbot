@@ -28,6 +28,7 @@ import {
 } from "../lib/models.js";
 import { refreshModelCache } from "../lib/model-cache.js";
 import { askYesNo, askInput, askMultiSelect, askSelect, isInteractive } from "../lib/prompt.js";
+import { fmt } from "../lib/format.js";
 
 const GATEWAY_URL = "https://gateway.mnemom.ai";
 const DASHBOARD_URL = "https://mnemom.ai";
@@ -44,9 +45,8 @@ export interface InitOptions {
 // ============================================================================
 
 export async function initCommand(options: InitOptions = {}): Promise<void> {
-  console.log("\n" + "=".repeat(60));
-  console.log("  smoltbot init - Transparent AI Agent Tracing");
-  console.log("=".repeat(60) + "\n");
+  console.log(fmt.header("smoltbot init - Transparent AI Agent Tracing"));
+  console.log();
 
   // Step 1: Check for existing smoltbot config
   const existingConfig = await handleExistingConfig(options);
@@ -184,7 +184,7 @@ async function standaloneFlow(
 
       // Validate format
       if (!apiKey.startsWith(format.prefix)) {
-        console.log(`  ✗ Invalid format: expected key ${format.description}`);
+        console.log(`  ${fmt.error(`Invalid format: expected key ${format.description}`)}`);
         if (!isInteractive()) break;
         console.log("  Try again.\n");
         continue;
@@ -194,20 +194,20 @@ async function standaloneFlow(
       console.log(`  Verifying ${label} API key...`);
       const verification = await verifyProviderApiKey(provider, apiKey);
       if (!verification.valid) {
-        console.log(`  ✗ ${verification.error}`);
+        console.log(`  ${fmt.error(verification.error || "Verification failed")}`);
         if (!isInteractive()) break;
         console.log("  Try again.\n");
         continue;
       }
 
-      console.log(`  ✓ ${label} API key verified\n`);
+      console.log(`  ${fmt.success(`${label} API key verified`)}\n`);
       verifiedProviders.push({ provider, apiKey });
       valid = true;
     }
   }
 
   if (verifiedProviders.length === 0) {
-    console.log("✗ No valid API keys configured\n");
+    console.log(fmt.error("No valid API keys configured") + "\n");
     console.log("At least one provider is required. Run smoltbot init again.\n");
     process.exit(1);
   }
@@ -233,7 +233,7 @@ async function standaloneFlow(
   };
 
   saveConfig(config);
-  console.log("✓ Created ~/.smoltbot/config.json\n");
+  console.log(fmt.success("Created ~/.smoltbot/config.json") + "\n");
 
   // Step 5: Show success + setup instructions
   showStandaloneSuccess(agentId, verifiedProviders, mnemomApiKey);
@@ -247,23 +247,22 @@ function showStandaloneSuccess(
   verifiedProviders: { provider: Provider; apiKey: string }[],
   mnemomApiKey?: string,
 ): void {
-  console.log("=".repeat(60));
-  console.log("  smoltbot initialized successfully!");
-  console.log("=".repeat(60) + "\n");
+  console.log(fmt.header("smoltbot initialized successfully!"));
+  console.log();
 
-  console.log(`Agent ID: ${agentId}\n`);
+  console.log(fmt.label("Agent ID:", agentId) + "\n");
 
   console.log("Verified providers:");
   for (const { provider } of verifiedProviders) {
-    console.log(`  ✓ ${PROVIDER_LABELS[provider]}`);
+    console.log(`  ${fmt.success(PROVIDER_LABELS[provider])}`);
   }
   if (mnemomApiKey) {
-    console.log(`  ✓ Mnemom API key configured`);
+    console.log(`  ${fmt.success("Mnemom API key configured")}`);
   }
   console.log();
 
-  console.log("─".repeat(50));
-  console.log("\nConfigure your agent to use the gateway:\n");
+  console.log(fmt.section("Configure your agent to use the gateway"));
+  console.log();
 
   if (mnemomApiKey) {
     console.log("  Set your Mnemom API key as an environment variable:\n");
@@ -329,16 +328,14 @@ function showStandaloneSuccess(
   console.log(`Your traces will appear at:\n`);
   console.log(`  ${DASHBOARD_URL}/agents/${agentId}\n`);
 
-  console.log("─".repeat(50));
-  console.log("\nClaim your agent:\n");
-  console.log("  smoltbot claim\n");
+  console.log(fmt.section("Claim your agent"));
+  console.log("\n  smoltbot claim\n");
   console.log("  This links your agent to your Mnemom account so");
   console.log("  you can manage traces and keep your data private.\n");
   console.log(`  Or visit: ${DASHBOARD_URL}/claim/${agentId}\n`);
 
-  console.log("─".repeat(50));
-  console.log("\nUseful commands:\n");
-  console.log("  smoltbot status     - Check configuration and connectivity");
+  console.log(fmt.section("Useful commands"));
+  console.log("\n  smoltbot status     - Check configuration and connectivity");
   console.log("  smoltbot claim      - Claim agent and link to your account");
   console.log("  smoltbot logs       - View recent traces");
   console.log("  smoltbot integrity  - View integrity score\n");
@@ -359,7 +356,7 @@ async function openclawFlow(
   const detection = detectProviders();
 
   if (!detection.installed) {
-    console.log("✗ OpenClaw not found\n");
+    console.log(fmt.error("OpenClaw not found") + "\n");
     console.log(detection.error || "OpenClaw is not installed.");
     console.log("\nInstall OpenClaw first: https://openclaw.ai\n");
     process.exit(1);
@@ -376,7 +373,7 @@ async function openclawFlowWithDetection(
   existingConfig: Config | null,
   detection: ProviderDetectionResult,
 ): Promise<void> {
-  console.log("✓ OpenClaw installation detected\n");
+  console.log(fmt.success("OpenClaw installation detected") + "\n");
 
   // Scan all providers for API keys
   const availableProviders: { provider: Provider; apiKey: string }[] = [];
@@ -388,7 +385,7 @@ async function openclawFlowWithDetection(
     } else if (info.invalidFormat) {
       console.log(`  ${PROVIDER_LABELS[provider]}: Invalid API key format (skipping)`);
     } else if (info.hasApiKey && info.apiKey) {
-      console.log(`✓ ${PROVIDER_LABELS[provider]} API key found`);
+      console.log(fmt.success(`${PROVIDER_LABELS[provider]} API key found`));
       availableProviders.push({ provider, apiKey: info.apiKey });
     } else {
       console.log(`  ${PROVIDER_LABELS[provider]}: No API key found`);
@@ -398,7 +395,7 @@ async function openclawFlowWithDetection(
 
   // Require at least one provider
   if (availableProviders.length === 0) {
-    console.log("✗ No provider API keys found\n");
+    console.log(fmt.error("No provider API keys found") + "\n");
     console.log("smoltbot requires at least one provider API key.");
     console.log("Configure API keys in OpenClaw:\n");
     console.log("  Anthropic: https://console.anthropic.com/settings/keys");
@@ -417,15 +414,15 @@ async function openclawFlowWithDetection(
     console.log(`Verifying ${PROVIDER_LABELS[provider]} API key...`);
     const verification = await verifyProviderApiKey(provider, apiKey);
     if (!verification.valid) {
-      console.log(`  ✗ ${verification.error} (skipping ${PROVIDER_LABELS[provider]})\n`);
+      console.log(`  ${fmt.error(`${verification.error} (skipping ${PROVIDER_LABELS[provider]})`)}\n`);
     } else {
-      console.log(`✓ ${PROVIDER_LABELS[provider]} API key verified\n`);
+      console.log(fmt.success(`${PROVIDER_LABELS[provider]} API key verified`) + "\n");
       verifiedProviders.push({ provider, apiKey });
     }
   }
 
   if (verifiedProviders.length === 0) {
-    console.log("✗ No valid API keys found\n");
+    console.log(fmt.error("No valid API keys found") + "\n");
     console.log("All detected API keys failed verification.");
     console.log("Check your API keys and try again.\n");
     process.exit(1);
@@ -435,13 +432,13 @@ async function openclawFlowWithDetection(
   const { modelId, provider: currentProvider } = parseCurrentModel(detection);
 
   if (!modelId) {
-    console.log("✗ No default model configured in OpenClaw\n");
+    console.log(fmt.error("No default model configured in OpenClaw") + "\n");
     console.log("Configure a default model first:");
     console.log("  openclaw models set anthropic/claude-opus-4-5-20251101\n");
     process.exit(1);
   }
 
-  console.log(`✓ Current model: ${currentProvider}/${modelId}`);
+  console.log(fmt.success(`Current model: ${currentProvider}/${modelId}`));
   console.log(`  (${formatModelName(modelId)})\n`);
 
   // Determine models to add per provider
@@ -462,7 +459,7 @@ async function openclawFlowWithDetection(
   const alreadyConfigured = detection.smoltbotConfiguredProviders;
   if (alreadyConfigured.length > 0 && !options.force) {
     const configuredNames = alreadyConfigured.map((p) => PROVIDER_LABELS[p]).join(", ");
-    console.log(`⚠ smoltbot already configured for: ${configuredNames}\n`);
+    console.log(fmt.warn(`smoltbot already configured for: ${configuredNames}`) + "\n");
     if (isInteractive() && !options.yes) {
       const reconfigure = await askYesNo("Reconfigure smoltbot providers?", true);
       if (!reconfigure) {
@@ -489,7 +486,7 @@ async function openclawFlowWithDetection(
 
   const configuredProviders = configureSmoltbotProviders(providerKeys);
   for (const provider of configuredProviders) {
-    console.log(`✓ ${PROVIDER_LABELS[provider]} provider configured (${PROVIDER_CONFIG_KEYS[provider]})`);
+    console.log(fmt.success(`${PROVIDER_LABELS[provider]} provider configured (${PROVIDER_CONFIG_KEYS[provider]})`));
   }
   console.log();
 
@@ -514,7 +511,7 @@ async function openclawFlowWithDetection(
     if (shouldSwitch) {
       console.log(`Setting default model to ${smoltbotModelPath}...`);
       setDefaultModel(smoltbotModelPath);
-      console.log(`✓ Default model set to ${smoltbotModelPath}\n`);
+      console.log(fmt.success(`Default model set to ${smoltbotModelPath}`) + "\n");
     } else {
       console.log(`Default model unchanged (${currentProvider}/${modelId})\n`);
       console.log("To enable traced mode later:");
@@ -547,8 +544,8 @@ async function openclawFlowWithDetection(
  * x-mnemom-api-key header to the gateway for quota/billing tracking.
  */
 async function promptMnemomApiKey(existingConfig: Config | null): Promise<string | undefined> {
-  console.log("─".repeat(50));
-  console.log("\nMnemom API Key (optional)");
+  console.log(fmt.section("Mnemom API Key (optional)"));
+  console.log();
   console.log("If you have a paid plan, enter your Mnemom API key");
   console.log("for gateway billing and quota tracking.");
   console.log(`Create one at: ${DASHBOARD_URL}/settings/api-keys\n`);
@@ -561,7 +558,7 @@ async function promptMnemomApiKey(existingConfig: Config | null): Promise<string
   if (!isInteractive()) {
     const envKey = process.env.MNEMOM_API_KEY || "";
     if (envKey && envKey.startsWith("mnm_")) {
-      console.log("  ✓ Mnemom API key found in MNEMOM_API_KEY\n");
+      console.log(`  ${fmt.success("Mnemom API key found in MNEMOM_API_KEY")}\n`);
       return envKey;
     }
     console.log("  No MNEMOM_API_KEY env var found, skipping.\n");
@@ -576,12 +573,12 @@ async function promptMnemomApiKey(existingConfig: Config | null): Promise<string
   }
 
   if (!key.startsWith("mnm_")) {
-    console.log("  ✗ Invalid format: Mnemom API keys start with mnm_");
+    console.log(`  ${fmt.error("Invalid format: Mnemom API keys start with mnm_")}`);
     console.log("  Skipping. You can add it later in ~/.smoltbot/config.json\n");
     return existingConfig?.mnemomApiKey;
   }
 
-  console.log("  ✓ Mnemom API key configured\n");
+  console.log(`  ${fmt.success("Mnemom API key configured")}\n`);
   return key;
 }
 
@@ -601,7 +598,7 @@ async function handleExistingConfig(
     return null;
   }
 
-  console.log("⚠ smoltbot is already initialized\n");
+  console.log(fmt.warn("smoltbot is already initialized") + "\n");
   console.log(`  Agent ID: ${existingConfig.agentId}`);
   console.log(`  Gateway:  ${existingConfig.gateway || GATEWAY_URL}\n`);
 
@@ -696,8 +693,8 @@ async function promptModelSwitch(
   if (options.yes) return true;
   if (!isInteractive()) return true;
 
-  console.log("─".repeat(50));
-  console.log("\nSwitch to traced mode now?");
+  console.log(fmt.section("Switch to traced mode now?"));
+  console.log();
   console.log(`  Current:  ${currentProvider}/${modelId}`);
   console.log(`  Traced:   ${smoltbotModelPath}\n`);
   console.log("When using smoltbot models, all API calls are logged for");
@@ -742,7 +739,7 @@ async function createSmoltbotConfig(
   };
 
   saveConfig(config);
-  console.log("✓ Created ~/.smoltbot/config.json\n");
+  console.log(fmt.success("Created ~/.smoltbot/config.json") + "\n");
 
   return agentId;
 }
@@ -758,23 +755,22 @@ function showOpenClawSuccessMessage(
   modelsPerProvider: Record<Provider, ModelDefinition[]>,
   switched: boolean = true
 ): void {
-  console.log("=".repeat(60));
-  console.log("  smoltbot initialized successfully!");
-  console.log("=".repeat(60) + "\n");
+  console.log(fmt.header("smoltbot initialized successfully!"));
+  console.log();
 
-  console.log(`Agent ID: ${agentId}\n`);
+  console.log(fmt.label("Agent ID:", agentId) + "\n");
 
   console.log("Configured providers:");
   for (const provider of configuredProviders) {
     const configKey = PROVIDER_CONFIG_KEYS[provider];
     const models = modelsPerProvider[provider] || [];
     const modelNames = models.map((m) => m.name).join(", ");
-    console.log(`  ✓ ${PROVIDER_LABELS[provider]} (${configKey}) — ${modelNames}`);
+    console.log(`  ${fmt.success(`${PROVIDER_LABELS[provider]} (${configKey}) — ${modelNames}`)}`);
   }
   console.log();
 
   if (switched) {
-    console.log("✓ Traced mode is now active\n");
+    console.log(fmt.success("Traced mode is now active") + "\n");
     console.log("All OpenClaw API calls will be traced. Your traces will");
     console.log("appear at:\n");
   } else {
@@ -788,22 +784,20 @@ function showOpenClawSuccessMessage(
 
   console.log(`  ${DASHBOARD_URL}/agents/${agentId}\n`);
 
-  console.log("─".repeat(50));
-  console.log("\nClaim your agent:\n");
-  console.log("  smoltbot claim\n");
+  console.log(fmt.section("Claim your agent"));
+  console.log("\n  smoltbot claim\n");
   console.log("  This links your agent to your Mnemom account so");
   console.log("  you can manage traces and keep your data private.\n");
   console.log(`  Or visit: ${DASHBOARD_URL}/claim/${agentId}\n`);
 
-  console.log("─".repeat(50));
-  console.log("\nUseful commands:\n");
-  console.log("  smoltbot status     - Check configuration and connectivity");
+  console.log(fmt.section("Useful commands"));
+  console.log("\n  smoltbot status     - Check configuration and connectivity");
   console.log("  smoltbot claim      - Claim agent and link to your account");
   console.log("  smoltbot logs       - View recent traces");
   console.log("  smoltbot integrity  - View integrity score\n");
 
-  console.log("─".repeat(50));
-  console.log("\nTo switch between traced and untraced mode:\n");
+  console.log(fmt.section("Switch between traced and untraced mode"));
+  console.log();
 
   for (const provider of configuredProviders) {
     const configKey = PROVIDER_CONFIG_KEYS[provider];

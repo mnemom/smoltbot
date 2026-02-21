@@ -88,3 +88,100 @@ export async function claimAgent(id: string, hashProof: string): Promise<ClaimRe
 
   return response.json() as Promise<ClaimResult>;
 }
+
+// ============================================================================
+// Alignment Card API
+// ============================================================================
+
+export interface AlignmentCard {
+  card_id?: string;
+  version?: string;
+  issued_at?: string;
+  expires_at?: string;
+  principal?: {
+    name?: string;
+    type?: string;
+    organization?: string;
+  };
+  values?: {
+    declared?: string[];
+    definitions?: Record<string, string>;
+  };
+  autonomy_envelope?: {
+    bounded_actions?: string[];
+    forbidden_actions?: string[];
+    escalation_triggers?: Array<{
+      condition: string;
+      action?: string;
+    }>;
+  };
+  audit_commitment?: {
+    log_level?: string;
+    retention_days?: number;
+    access_policy?: string;
+  };
+  extensions?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface CardResponse {
+  card_id: string;
+  agent_id: string;
+  card_json: AlignmentCard;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getCard(agentId: string): Promise<CardResponse | null> {
+  try {
+    return await fetchApi<CardResponse>(`/v1/agents/${agentId}/card`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("404") || message.includes("not found")) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+export async function updateCard(
+  agentId: string,
+  cardJson: AlignmentCard
+): Promise<{ updated: boolean; card_id: string }> {
+  const url = `${API_BASE}/v1/agents/${agentId}/card`;
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ card_json: cardJson }),
+  });
+
+  if (!response.ok) {
+    const error = (await response.json().catch(() => ({
+      error: "unknown",
+      message: response.statusText,
+    }))) as ApiError;
+    throw new Error(error.message || `Card update failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<{ updated: boolean; card_id: string }>;
+}
+
+export async function reverifyAgent(
+  agentId: string
+): Promise<{ reverified: number }> {
+  const url = `${API_BASE}/v1/agents/${agentId}/reverify`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!response.ok) {
+    const error = (await response.json().catch(() => ({
+      error: "unknown",
+      message: response.statusText,
+    }))) as ApiError;
+    throw new Error(error.message || `Reverify failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<{ reverified: number }>;
+}

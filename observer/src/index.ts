@@ -28,6 +28,7 @@ import {
 } from '@mnemom/agent-alignment-protocol';
 
 import { createWorkersExporter, type WorkersOTelExporter } from '@mnemom/aip-otel-exporter/workers';
+import { mergeOrgAndAgentCard } from './card-merge';
 
 // ============================================================================
 // Types
@@ -1152,34 +1153,91 @@ async function analyzeWithHaiku(
 // ============================================================================
 
 /**
- * Fetch the active alignment card for an agent
+ * Fetch the active alignment card for an agent, merged with org card template (Phase 3c).
+ * If the agent's org has a card template enabled (and the agent is not exempt),
+ * the org template is merged as a base layer under the agent card.
  */
 async function fetchCard(
   agentId: string,
   env: Env
 ): Promise<AlignmentCard | null> {
   try {
-    const response = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
-      {
-        headers: {
-          apikey: env.SUPABASE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        },
-      }
-    );
+    const supabaseHeaders = {
+      apikey: env.SUPABASE_KEY,
+      Authorization: `Bearer ${env.SUPABASE_KEY}`,
+    };
 
-    if (!response.ok) {
-      console.warn(`[observer] Failed to fetch card for ${agentId}: ${response.status}`);
-      return null;
+    // Fetch card, agent exemption status, and org card template in parallel
+    const [cardResponse, agentResponse, orgCardTemplateResult] = await Promise.all([
+      fetch(
+        `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
+        { headers: supabaseHeaders }
+      ),
+      fetch(
+        `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=org_card_exempt&limit=1`,
+        { headers: supabaseHeaders }
+      ),
+      fetchOrgCardTemplateForObserver(agentId, env),
+    ]);
+
+    // Parse agent card
+    let agentCard: AlignmentCard | null = null;
+    if (cardResponse.ok) {
+      const cards = (await cardResponse.json()) as Array<{ card_json: AlignmentCard }>;
+      agentCard = cards[0]?.card_json || null;
+    } else {
+      console.warn(`[observer] Failed to fetch card for ${agentId}: ${cardResponse.status}`);
     }
 
-    const cards = (await response.json()) as Array<{ card_json: AlignmentCard }>;
+    // Parse agent exemption status
+    let orgCardExempt = false;
+    if (agentResponse.ok) {
+      const agents = (await agentResponse.json()) as Array<{ org_card_exempt?: boolean }>;
+      if (agents.length > 0) {
+        orgCardExempt = agents[0].org_card_exempt === true;
+      }
+    }
 
-    return cards[0]?.card_json || null;
+    // Phase 3c: Merge org card template with agent card
+    const orgCardTemplate = (orgCardTemplateResult?.card_template_enabled
+      ? orgCardTemplateResult.card_template
+      : null) ?? null;
+
+    return mergeOrgAndAgentCard(orgCardTemplate, agentCard as Record<string, any> | null, orgCardExempt) as AlignmentCard | null;
   } catch (error) {
     console.error(`[observer] Error fetching card for ${agentId}:`, error);
     return null;
+  }
+}
+
+/**
+ * Fetch org card template for an agent (Phase 3c).
+ * Uses Supabase RPC. Fail-open: returns null on error.
+ */
+async function fetchOrgCardTemplateForObserver(
+  agentId: string,
+  env: Env
+): Promise<{ card_template_enabled: boolean; card_template?: Record<string, any> } | null> {
+  try {
+    const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/get_org_card_template_for_agent`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_agent_id: agentId }),
+    });
+
+    if (!response.ok) {
+      console.warn(`[observer/card-tpl] RPC failed for ${agentId}: ${response.status}`);
+      return { card_template_enabled: false };
+    }
+
+    return (await response.json()) as any;
+  } catch (error) {
+    console.warn('[observer/card-tpl] fetchOrgCardTemplate failed (fail-open):', error);
+    return { card_template_enabled: false };
   }
 }
 

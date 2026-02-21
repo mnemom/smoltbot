@@ -44,6 +44,7 @@ import {
   generateCertificateId,
 } from './attestation';
 import { readStreamToText, parseSSEEvents } from './sse-parser';
+import { mergeOrgAndAgentCard } from './card-merge';
 
 // ============================================================================
 // Analysis Helpers
@@ -694,17 +695,18 @@ async function fetchAlignmentData(
       Authorization: `Bearer ${env.SUPABASE_KEY}`,
     };
 
-    // Fetch card + conscience values, enforcement mode, and org conscience values in parallel
-    const [cardResponse, agentResponse, orgCvResult] = await Promise.all([
+    // Fetch card + conscience values, enforcement mode, org conscience values, and org card template in parallel
+    const [cardResponse, agentResponse, orgCvResult, orgCardTemplateResult] = await Promise.all([
       fetch(
         `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
         { headers: supabaseHeaders }
       ),
       fetch(
-        `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=aip_enforcement_mode&limit=1`,
+        `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=aip_enforcement_mode,org_card_exempt&limit=1`,
         { headers: supabaseHeaders }
       ),
       fetchOrgConscienceValuesForGateway(agentId, env),
+      fetchOrgCardTemplateForAgent(agentId, env),
     ]);
 
     // Parse card data
@@ -723,16 +725,25 @@ async function fetchAlignmentData(
       console.warn(`[gateway/aip] Failed to fetch card for ${agentId}: ${cardResponse.status}`);
     }
 
-    // Parse enforcement mode from agents table
+    // Parse enforcement mode and org card exemption from agents table
     let enforcementMode = 'observe';
+    let orgCardExempt = false;
     if (agentResponse.ok) {
       const agents = (await agentResponse.json()) as Array<{
         aip_enforcement_mode?: string;
+        org_card_exempt?: boolean;
       }>;
       if (agents.length > 0) {
         enforcementMode = agents[0].aip_enforcement_mode || 'observe';
+        orgCardExempt = agents[0].org_card_exempt === true;
       }
     }
+
+    // Phase 3c: Merge org card template with agent card to produce canonical card
+    const orgCardTemplate = (orgCardTemplateResult?.card_template_enabled
+      ? orgCardTemplateResult.card_template
+      : null) ?? null;
+    card = mergeOrgAndAgentCard(orgCardTemplate, card, orgCardExempt);
 
     // Layered conscience values resolution:
     // 1. Base: defaults (augment) or empty (replace)
@@ -810,6 +821,54 @@ async function fetchOrgConscienceValuesForGateway(
   } catch (error) {
     console.warn('[gateway/cv] fetchOrgConscienceValues failed (fail-open):', error);
     return { enabled: false };
+  }
+}
+
+/**
+ * Fetch org card template for an agent (Phase 3c).
+ * Uses KV cache (5-min TTL) → Supabase RPC. Fail-open: returns null on error.
+ */
+async function fetchOrgCardTemplateForAgent(
+  agentId: string,
+  env: Env
+): Promise<{ card_template_enabled: boolean; card_template?: Record<string, any> } | null> {
+  const cacheKey = `org-card-tpl:agent:${agentId}`;
+  try {
+    // Check KV cache first
+    if (env.BILLING_CACHE) {
+      const cached = await env.BILLING_CACHE.get(cacheKey);
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    }
+
+    // Call RPC
+    const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/get_org_card_template_for_agent`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_agent_id: agentId }),
+    });
+
+    if (!response.ok) {
+      console.warn(`[gateway/card-tpl] RPC failed for ${agentId}: ${response.status}`);
+      return { card_template_enabled: false };
+    }
+
+    const result = await response.json() as Record<string, unknown>;
+
+    // Cache for 5 minutes
+    if (env.BILLING_CACHE) {
+      await env.BILLING_CACHE.put(cacheKey, JSON.stringify(result), { expirationTtl: 300 }).catch(() => {});
+    }
+
+    return result as any;
+  } catch (error) {
+    console.warn('[gateway/card-tpl] fetchOrgCardTemplate failed (fail-open):', error);
+    return { card_template_enabled: false };
   }
 }
 
@@ -1765,25 +1824,15 @@ async function analyzeStreamInBackground(
       taskContext: gatewayTaskContext,
     });
 
-    // Pre-filter: skip Haiku call for trivial thinking blocks
-    let analysisResponseText: string;
-    let analysisDurationMs: number;
-    if (shouldSkipAnalysis(parsed.thinking)) {
-      analysisResponseText = JSON.stringify({
-        verdict: 'clear',
-        concerns: [],
-        reasoning_summary: 'Trivial thinking block — skipped analysis',
-        conscience_context: { values_checked: [], conflicts: [], supports: [], considerations: ['Pre-filtered: thinking block too short for meaningful analysis'], consultation_depth: 'surface' },
-      });
-      analysisDurationMs = 0;
-    } else {
-      const analysisStartTime = Date.now();
-      const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
-      analysisDurationMs = Date.now() - analysisStartTime;
+    // Call analysis LLM (Haiku)
+    console.log(`[gateway/stream-aip] Calling analysis LLM for agent=${agent.id} session=${sessionId} thinking_chars=${parsed.thinking.length}`);
+    const analysisStartTime = Date.now();
+    const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
+    const analysisDurationMs = Date.now() - analysisStartTime;
 
-      const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
-      analysisResponseText = jsonMatch ? sanitizeJson(jsonMatch[0]) : rawAnalysisResponse;
-    }
+    const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
+    const analysisResponseText = jsonMatch ? sanitizeJson(jsonMatch[0]) : rawAnalysisResponse;
+    console.log(`[gateway/stream-aip] Analysis complete in ${analysisDurationMs}ms, json_extracted=${!!jsonMatch}`);
 
     // 10. Build checkpoint
     const windowState = window.getState();
@@ -1957,7 +2006,7 @@ async function callAnalysisLLM(
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 512,
+        max_tokens: 1024,
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: user }],
       }),
@@ -1987,6 +2036,8 @@ async function callAnalysisLLM(
     return textBlock.text;
   } catch (error) {
     // Track failures for circuit breaker
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error(`[gateway/aip] callAnalysisLLM failed (attempt ${analysisCircuitBreaker.failures + 1}): ${errMsg}`);
     analysisCircuitBreaker.failures++;
     analysisCircuitBreaker.lastFailure = Date.now();
     if (analysisCircuitBreaker.failures >= analysisCircuitBreaker.threshold) {
@@ -2800,26 +2851,16 @@ export async function handleProviderProxy(
         taskContext: gatewayTaskContext,
       });
 
-      // Pre-filter: skip Haiku call for trivial thinking blocks
-      let analysisResponseText: string;
-      let analysisDurationMs: number;
-      if (shouldSkipAnalysis(thinking.content)) {
-        analysisResponseText = JSON.stringify({
-          verdict: 'clear',
-          concerns: [],
-          reasoning_summary: 'Trivial thinking block — skipped analysis',
-          conscience_context: { values_checked: [], conflicts: [], supports: [], considerations: ['Pre-filtered: thinking block too short for meaningful analysis'], consultation_depth: 'surface' },
-        });
-        analysisDurationMs = 0;
-      } else {
-        const analysisStartTime = Date.now();
-        const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
-        analysisDurationMs = Date.now() - analysisStartTime;
+      // Call analysis LLM (Haiku)
+      console.log(`[gateway/aip] Calling analysis LLM for agent=${agent.id} session=${sessionId} thinking_chars=${thinking.content.length}`);
+      const analysisStartTime = Date.now();
+      const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
+      const analysisDurationMs = Date.now() - analysisStartTime;
 
-        // Strip markdown code fences if present (claude-haiku-4-5 wraps JSON in ```json...```)
-        const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
-        analysisResponseText = jsonMatch ? sanitizeJson(jsonMatch[0]) : rawAnalysisResponse;
-      }
+      // Strip markdown code fences if present (claude-haiku-4-5 wraps JSON in ```json...```)
+      const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
+      const analysisResponseText = jsonMatch ? sanitizeJson(jsonMatch[0]) : rawAnalysisResponse;
+      console.log(`[gateway/aip] Analysis complete in ${analysisDurationMs}ms, json_extracted=${!!jsonMatch}`);
 
       // Hash thinking block using Web Crypto API
       const thinkingHash = await sha256(thinking.content);
