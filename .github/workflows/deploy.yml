@@ -104,11 +104,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Add swap
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Install Flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Login to Fly registry
+        uses: docker/login-action@v3
+        with:
+          registry: registry.fly.io
+          username: x
+          password: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Build prover image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: prover/Dockerfile
+          push: true
+          tags: registry.fly.io/mnemom-prover:deployment-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only --config prover/fly.toml --dockerfile prover/Dockerfile
+        run: flyctl deploy --image registry.fly.io/mnemom-prover:deployment-${{ github.sha }} --config prover/fly.toml
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
