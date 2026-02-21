@@ -2,7 +2,7 @@
 # Uses cargo-chef for dependency caching across CI runs.
 # First build: ~20min.  Code-only changes: ~2min.
 
-FROM rust:1.85-bookworm AS chef
+FROM rust:1.88-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
