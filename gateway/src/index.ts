@@ -72,6 +72,9 @@ export interface Env {
   // Phase 1 VIE: Ed25519 checkpoint attestation
   ED25519_SIGNING_KEY?: string;         // 64-char hex secret key
   ED25519_KEY_ID?: string;              // Key identifier (e.g. "key-001")
+  // Phase 3: ZK proving via RISC Zero
+  PROVER_URL?: string;                  // e.g. "https://prover.mnemom.ai"
+  PROVER_API_KEY?: string;              // Shared secret for prover auth
 }
 
 interface Agent {
@@ -981,6 +984,83 @@ async function storeCheckpoint(
 }
 
 /**
+ * Determine whether a checkpoint should be proven via zkVM.
+ * boundary_violation verdicts are always proven (when enabled).
+ * Other verdicts are stochastically sampled at the configured proof_rate.
+ */
+function shouldProve(
+  checkpoint: { verdict: string },
+  agentSettings: AgentSettings | null,
+): boolean {
+  if (!agentSettings?.proof_enabled) return false;
+  if (checkpoint.verdict === 'boundary_violation') return true;
+  const rate = (agentSettings.proof_rate ?? 10) / 100;
+  return Math.random() < rate;
+}
+
+/**
+ * Request a ZK proof for a checkpoint's verdict derivation.
+ * Inserts a pending row in verdict_proofs, then fire-and-forget POSTs
+ * to the external RISC Zero prover service. Fail-open throughout.
+ */
+async function requestProof(
+  checkpointId: string,
+  checkpointData: {
+    analysis_response_text?: string;
+    thinking_block_hash: string;
+    card_hash?: string;
+    values_hash?: string;
+    model: string;
+  },
+  attestation: { input_commitment?: string } | undefined,
+  env: Env,
+): Promise<void> {
+  if (!env.PROVER_URL) return;
+
+  const proofId = `prf-${crypto.randomUUID().slice(0, 8)}`;
+
+  // Insert pending proof row
+  try {
+    const res = await fetch(`${env.SUPABASE_URL}/rest/v1/verdict_proofs`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        proof_id: proofId,
+        checkpoint_id: checkpointId,
+        proof_type: 'risc-zero-stark',
+        status: 'pending',
+      }),
+    });
+    if (!res.ok) return;
+  } catch {
+    return;
+  }
+
+  // Fire-and-forget POST to prover
+  fetch(`${env.PROVER_URL}/prove`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(env.PROVER_API_KEY ? { 'X-Prover-Key': env.PROVER_API_KEY } : {}),
+    },
+    body: JSON.stringify({
+      proof_id: proofId,
+      checkpoint_id: checkpointId,
+      analysis_json: checkpointData.analysis_response_text || '',
+      thinking_hash: checkpointData.thinking_block_hash,
+      card_hash: checkpointData.card_hash || '',
+      values_hash: checkpointData.values_hash || '',
+      model: checkpointData.model,
+    }),
+  }).catch(() => { /* fail-open */ });
+}
+
+/**
  * Submit a metering event for billing. Non-blocking, fail-open.
  */
 export async function submitMeteringEvent(
@@ -1718,6 +1798,22 @@ async function analyzeStreamInBackground(
     await deliverWebhooks(checkpoint, env);
     if (otelExporter) {
       await otelExporter.flush();
+    }
+
+    // 13b. Request ZK proof if enabled
+    if (shouldProve(checkpoint, agentSettings)) {
+      requestProof(
+        checkpoint.checkpoint_id,
+        {
+          analysis_response_text: analysisResponseText,
+          thinking_block_hash: thinkingHash,
+          card_hash: await sha256(JSON.stringify(aipCard)),
+          values_hash: await sha256(JSON.stringify(values)),
+          model: 'streaming',
+        },
+        attestation ? { input_commitment: attestation.input_commitment } : undefined,
+        env,
+      ).catch(() => { /* fail-open */ });
     }
 
     // 14. Create nudge for boundary violations
@@ -2718,6 +2814,22 @@ export async function handleProviderProxy(
       ctx.waitUntil(deliverWebhooks(checkpoint, env));
       if (otelExporter) {
         ctx.waitUntil(otelExporter.flush());
+      }
+
+      // Request ZK proof if enabled
+      if (shouldProve(checkpoint, agentSettings)) {
+        ctx.waitUntil(requestProof(
+          checkpoint.checkpoint_id,
+          {
+            analysis_response_text: analysisResponseText,
+            thinking_block_hash: thinkingHash,
+            card_hash: await sha256(JSON.stringify(aipCard)),
+            values_hash: await sha256(JSON.stringify(values)),
+            model: 'claude-haiku-4-5-20251001',
+          },
+          attestation ? { input_commitment: attestation.input_commitment } : undefined,
+          env,
+        ).catch(() => { /* fail-open */ }));
       }
 
       // Create pending nudge for boundary violations (nudge or enforce mode)
