@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "@mnemom/agent-alignment-protocol": "^0.1.8",
-    "@mnemom/agent-integrity-protocol": "^0.1.7",
     "@mnemom/aip-otel-exporter": "^0.1.0",
     "stripe": "^20.3.1"
   },

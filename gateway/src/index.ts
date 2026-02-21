@@ -43,6 +43,7 @@ import {
   buildSignedPayload,
   generateCertificateId,
 } from './attestation';
+import { readStreamToText, parseSSEEvents } from './sse-parser';
 
 // ============================================================================
 // Types
@@ -102,6 +103,9 @@ export interface AgentSettings {
   aip_enabled: boolean;
   proof_enabled: boolean;
   proof_rate: number;
+  nudge_strategy?: 'always' | 'sampling' | 'threshold' | 'off';
+  nudge_rate?: number;
+  nudge_threshold?: number;
 }
 
 export interface QuotaContext {
@@ -1210,6 +1214,531 @@ async function createPendingNudge(
 }
 
 /**
+ * Reusable attestation: Ed25519 signing, chain hash, Merkle tree, certificate.
+ * Called from both the non-streaming and streaming (background) AIP paths.
+ * Fail-open: returns undefined on any error.
+ */
+async function attestCheckpoint(
+  checkpoint: IntegrityCheckpoint,
+  agent: { id: string },
+  sessionId: string,
+  thinkingHash: string,
+  card: AIPAlignmentCard,
+  conscienceValues: ConscienceValue[],
+  windowCheckpoints: Array<{ checkpoint_id: string; verdict: string; reasoning_summary: string }>,
+  quotaContext: QuotaContext,
+  env: Env
+): Promise<AttestationData | undefined> {
+  const attestationEnabled = quotaContext.feature_flags?.cryptographic_attestation !== false;
+  try {
+    const signingKeyHex = env.ED25519_SIGNING_KEY;
+    if (!signingKeyHex || !attestationEnabled) return undefined;
+
+    const signingKeyId = env.ED25519_KEY_ID || 'key-001';
+
+    // 1. Compute input commitment over analysis inputs
+    const inputCommitment = await computeInputCommitment({
+      card: card as unknown as { card_id: string; values: unknown[]; [key: string]: unknown },
+      conscienceValues: (conscienceValues || []) as Array<{ type: string; content: string; id?: string }>,
+      windowContext: windowCheckpoints,
+      modelVersion: 'claude-haiku-4-5-20251001',
+      promptTemplateVersion: '1.0.0',
+    });
+
+    // 2. Fetch previous chain hash (genesis if first checkpoint)
+    const prevChainHash = await fetchPrevChainHash(agent.id, sessionId, env);
+
+    // 3. Compute chain hash linking to previous checkpoint
+    const chainHash = await computeChainHash({
+      prevChainHash,
+      checkpointId: checkpoint.checkpoint_id,
+      verdict: checkpoint.verdict,
+      thinkingBlockHash: thinkingHash,
+      inputCommitment,
+      timestamp: checkpoint.timestamp,
+    });
+
+    // 4. Build canonical payload and sign with Ed25519
+    const signedPayload = buildSignedPayload({
+      checkpointId: checkpoint.checkpoint_id,
+      agentId: checkpoint.agent_id,
+      verdict: checkpoint.verdict,
+      thinkingBlockHash: thinkingHash,
+      inputCommitment,
+      chainHash,
+      timestamp: checkpoint.timestamp,
+    });
+    const secretKey = loadSigningKeyFromHex(signingKeyHex);
+    const signatureValue = await ed25519Sign(signedPayload, secretKey);
+
+    // 5. Merkle tree update — append leaf and recompute root
+    const leafHash = computeLeafHash({
+      checkpointId: checkpoint.checkpoint_id,
+      verdict: checkpoint.verdict,
+      thinkingBlockHash: thinkingHash,
+      chainHash,
+      timestamp: checkpoint.timestamp,
+    });
+    const existingLeaves = await fetchMerkleTreeLeaves(agent.id, env);
+    const allLeaves = [...existingLeaves, leafHash];
+    const newTreeState = buildTreeState(allLeaves);
+    const merkleLeafIndex = allLeaves.length - 1;
+
+    // Fire-and-forget: update Merkle tree in DB
+    upsertMerkleTree(
+      agent.id,
+      newTreeState.root,
+      newTreeState.depth,
+      newTreeState.leafCount,
+      leafHash,
+      env
+    );
+
+    // 6. Generate certificate ID
+    const certificateId = generateCertificateId();
+
+    const attestation: AttestationData = {
+      input_commitment: inputCommitment,
+      chain_hash: chainHash,
+      prev_chain_hash: prevChainHash,
+      merkle_leaf_index: merkleLeafIndex,
+      certificate_id: certificateId,
+      signature: signatureValue,
+      signing_key_id: signingKeyId,
+    };
+
+    console.log(`[attestation] ${checkpoint.checkpoint_id} cert=${certificateId}`);
+    return attestation;
+  } catch (attestError) {
+    const errMsg = attestError instanceof Error ? `${attestError.message}\n${attestError.stack}` : String(attestError);
+    console.warn('[gateway/attestation] Attestation failed (fail-open):', errMsg);
+    return undefined;
+  }
+}
+
+/**
+ * Check if an agent should be auto-contained based on consecutive boundary violations.
+ * Pauses the agent and logs the containment action.
+ */
+async function checkAutoContainment(
+  agentId: string,
+  sessionId: string,
+  checkpoint: IntegrityCheckpoint,
+  env: Env
+): Promise<void> {
+  try {
+    const agentRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=auto_containment_threshold,containment_status`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!agentRes.ok) return;
+
+    const agents = (await agentRes.json()) as Array<Record<string, unknown>>;
+    if (agents.length === 0) return;
+
+    const agent = agents[0];
+    const threshold = agent.auto_containment_threshold as number | null;
+    const currentStatus = agent.containment_status as string;
+
+    if (!threshold || currentStatus === 'paused' || currentStatus === 'killed') return;
+
+    const checkpointRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&order=created_at.desc&limit=${threshold + 5}&select=verdict`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!checkpointRes.ok) return;
+
+    const checkpoints = (await checkpointRes.json()) as Array<{ verdict: string }>;
+
+    let consecutiveCount = 0;
+    for (const cp of checkpoints) {
+      if (cp.verdict === 'boundary_violation') {
+        consecutiveCount++;
+      } else {
+        break;
+      }
+    }
+
+    if (consecutiveCount < threshold) return;
+
+    console.log(`[gateway/containment] Auto-pausing agent ${agentId}: ${consecutiveCount} consecutive boundary violations (threshold: ${threshold})`);
+
+    const now = new Date().toISOString();
+    const reason = `Auto-contained: ${consecutiveCount} consecutive boundary violations`;
+
+    const updateUrl = new URL(`${env.SUPABASE_URL}/rest/v1/agents`);
+    updateUrl.searchParams.set('id', `eq.${agentId}`);
+
+    await fetch(updateUrl.toString(), {
+      method: 'PATCH',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        containment_status: 'paused',
+        contained_at: now,
+        contained_by: 'system',
+        containment_reason: reason,
+      }),
+    });
+
+    const logId = `ctl-${randomHex(6)}`;
+
+    await fetch(`${env.SUPABASE_URL}/rest/v1/agent_containment_log`, {
+      method: 'POST',
+      headers: {
+        apikey: env.SUPABASE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        id: logId,
+        agent_id: agentId,
+        action: 'auto_pause',
+        actor: 'system',
+        reason,
+        previous_status: currentStatus,
+        new_status: 'paused',
+        metadata: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id }),
+      }),
+    });
+
+    // Purge KV cache if available
+    if (env.BILLING_CACHE) {
+      await env.BILLING_CACHE.delete(`quota:agent:${agentId}`).catch(() => {});
+    }
+
+    console.log(`[gateway/containment] Agent ${agentId} auto-paused successfully`);
+  } catch (err) {
+    console.warn('[gateway/containment] checkAutoContainment error (fail-open):', err);
+  }
+}
+
+/**
+ * Determine whether a nudge should be created based on the agent's nudge strategy.
+ */
+function shouldCreateNudge(
+  agentSettings: AgentSettings | null,
+  sessionViolationCount: number
+): boolean {
+  const strategy = agentSettings?.nudge_strategy || 'always';
+
+  switch (strategy) {
+    case 'off':
+      return false;
+    case 'sampling': {
+      const rate = agentSettings?.nudge_rate ?? agentSettings?.proof_rate ?? 100;
+      return Math.random() * 100 < rate;
+    }
+    case 'threshold': {
+      const threshold = agentSettings?.nudge_threshold ?? 3;
+      return sessionViolationCount >= threshold;
+    }
+    case 'always':
+    default:
+      return true;
+  }
+}
+
+/**
+ * Count boundary violations in the current session for threshold-based nudging.
+ */
+async function countSessionViolations(
+  agentId: string,
+  sessionId: string,
+  env: Env
+): Promise<number> {
+  try {
+    const res = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&session_id=eq.${sessionId}&verdict=eq.boundary_violation&select=checkpoint_id`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          Prefer: 'count=exact',
+        },
+      }
+    );
+    if (!res.ok) return 0;
+    const countHeader = res.headers.get('content-range');
+    if (countHeader) {
+      const match = countHeader.match(/\/(\d+)/);
+      if (match) return parseInt(match[1], 10);
+    }
+    const data = (await res.json()) as unknown[];
+    return data.length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Background analysis for tee'd streaming responses.
+ * Reads the analysis fork of the stream, parses SSE, extracts thinking,
+ * runs the full AIP pipeline with attestation, creates nudges if needed.
+ * Entirely fail-open — errors are logged but never affect the client stream.
+ */
+async function analyzeStreamInBackground(
+  stream: ReadableStream,
+  provider: string,
+  agent: { id: string },
+  sessionId: string,
+  agentSettings: AgentSettings | null,
+  quotaContext: QuotaContext,
+  requestBody: Record<string, any> | null,
+  otelExporter: ReturnType<typeof createWorkersExporter> | null,
+  env: Env
+): Promise<void> {
+  try {
+    // 1. Read the tee'd stream to completion
+    const sseText = await readStreamToText(stream);
+
+    // 2. Parse SSE events
+    const parsed = parseSSEEvents(sseText, provider);
+
+    // 3. Skip if no thinking content
+    if (!parsed.thinking) {
+      console.log(`[gateway/stream-aip] No thinking block in streaming response (provider: ${provider})`);
+      return;
+    }
+
+    // 4. Fetch alignment data and recent checkpoints in parallel
+    const [alignmentData, historicalCheckpoints] = await Promise.all([
+      fetchAlignmentData(agent.id, env),
+      fetchRecentCheckpoints(agent.id, sessionId, env),
+    ]);
+
+    const { card, conscienceValues, enforcementMode } = alignmentData;
+
+    if (!card) {
+      console.log('[gateway/stream-aip] No alignment card found, skipping');
+      return;
+    }
+
+    const aipCard = mapCardToAIP(card);
+
+    // 5. Create WindowManager and hydrate
+    const windowConfig = {
+      max_size: 10,
+      mode: 'sliding' as const,
+      session_boundary: 'reset' as const,
+      max_age_seconds: 3600,
+    };
+    const window = new WindowManager(windowConfig, sessionId);
+    for (const cp of historicalCheckpoints) {
+      window.push(cp);
+    }
+
+    // 6. Hash thinking block
+    const thinkingHash = await sha256(parsed.thinking);
+
+    // 7. Hybrid mode — call hosted /v1/analyze if no local ANTHROPIC_API_KEY
+    if (!env.ANTHROPIC_API_KEY && env.MNEMOM_ANALYZE_URL && env.MNEMOM_API_KEY) {
+      try {
+        const hybridController = new AbortController();
+        const hybridTimeout = setTimeout(() => hybridController.abort(), 10000);
+        const values: ConscienceValue[] = conscienceValues || [...DEFAULT_CONSCIENCE_VALUES];
+        const hybridResponse = await fetch(env.MNEMOM_ANALYZE_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Mnemom-Api-Key': env.MNEMOM_API_KEY,
+          },
+          body: JSON.stringify({
+            thinking_block: parsed.thinking,
+            thinking_metadata: { provider, model: 'streaming' },
+            agent_id: agent.id,
+            session_id: sessionId,
+            card: aipCard,
+            conscience_values: values,
+            task_context: (() => {
+              const desc = card?.extensions?.mnemom?.description || card?.extensions?.mnemom?.role || '';
+              return desc ? desc.toString().slice(0, 200) : undefined;
+            })(),
+            window_context: window.getState().checkpoints.map((cp: IntegrityCheckpoint) => ({
+              checkpoint_id: cp.checkpoint_id,
+              verdict: cp.verdict,
+              reasoning_summary: cp.reasoning_summary,
+            })),
+            store_checkpoint: true,
+          }),
+          signal: hybridController.signal,
+        });
+        clearTimeout(hybridTimeout);
+
+        if (hybridResponse.ok) {
+          const hybridResult = (await hybridResponse.json()) as Record<string, unknown>;
+          const hybridCheckpoint = hybridResult.checkpoint as IntegrityCheckpoint;
+
+          // Create nudge for violations
+          if (
+            hybridCheckpoint.verdict === 'boundary_violation' &&
+            (enforcementMode === 'nudge' || enforcementMode === 'enforce')
+          ) {
+            const violationCount = await countSessionViolations(agent.id, sessionId, env);
+            if (shouldCreateNudge(agentSettings, violationCount)) {
+              await createPendingNudge(hybridCheckpoint, agent.id, sessionId, env);
+            }
+            await checkAutoContainment(agent.id, sessionId, hybridCheckpoint, env);
+          }
+          console.log(`[gateway/stream-aip] Hybrid analysis complete: verdict=${hybridCheckpoint.verdict}`);
+          return;
+        }
+        console.error(`[gateway/stream-aip] Hybrid analyze returned ${hybridResponse.status}`);
+      } catch (hybridErr) {
+        console.error('[gateway/stream-aip] Hybrid analyze failed:', hybridErr);
+      }
+      return; // fail-open for hybrid
+    }
+
+    // 8. Skip if no analysis capability configured
+    if (!env.ANTHROPIC_API_KEY) {
+      console.log('[gateway/stream-aip] No analysis capability configured, skipping');
+      return;
+    }
+
+    // 9. Build conscience prompt and call analysis LLM
+    const values: ConscienceValue[] = conscienceValues || [...DEFAULT_CONSCIENCE_VALUES];
+
+    const gatewayAgentDesc = card?.extensions?.mnemom?.description
+      || card?.extensions?.mnemom?.role
+      || '';
+    let gatewayUserQuery = '';
+    try {
+      const msgs = requestBody?.messages;
+      if (Array.isArray(msgs) && msgs.length > 0) {
+        const lastUserMsg = [...msgs].reverse().find((m: any) => m.role === 'user');
+        if (lastUserMsg) {
+          const content = typeof lastUserMsg.content === 'string'
+            ? lastUserMsg.content
+            : Array.isArray(lastUserMsg.content)
+              ? lastUserMsg.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ')
+              : '';
+          gatewayUserQuery = content.slice(0, 200);
+        }
+      }
+    } catch { /* fail-open */ }
+
+    const gatewayTaskParts = [
+      gatewayAgentDesc ? `${gatewayAgentDesc}.` : '',
+      gatewayUserQuery ? `User request: ${gatewayUserQuery}` : '',
+    ].filter(Boolean);
+    const gatewayTaskContext = gatewayTaskParts.length > 0 ? gatewayTaskParts.join(' ') : undefined;
+
+    const prompt = buildConsciencePrompt({
+      card: aipCard,
+      conscienceValues: values,
+      windowContext: window.getState().checkpoints,
+      thinkingBlock: parsed.thinking,
+      taskContext: gatewayTaskContext,
+    });
+
+    const analysisStartTime = Date.now();
+    const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
+    const analysisDurationMs = Date.now() - analysisStartTime;
+
+    const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
+    const analysisResponseText = jsonMatch ? jsonMatch[0] : rawAnalysisResponse;
+
+    // 10. Build checkpoint
+    const windowState = window.getState();
+    const checkpoint = checkIntegrity({
+      analysisResponse: analysisResponseText,
+      thinking: {
+        hash: thinkingHash,
+        provider,
+        model: 'streaming',
+        tokensOriginal: prompt.originalTokens,
+        tokensAnalyzed: prompt.analyzedTokens,
+        truncated: prompt.truncated,
+        confidence: 1.0,
+      },
+      agentId: agent.id,
+      cardId: aipCard.card_id,
+      sessionId,
+      windowPosition: {
+        index: windowState.size,
+        window_size: windowState.size + 1,
+      },
+      analysisModel: 'claude-haiku-4-5-20251001',
+      analysisDurationMs,
+    });
+
+    window.push(checkpoint);
+    const summary = window.getSummary();
+    const signal = buildSignal(checkpoint, summary);
+
+    if (otelExporter) {
+      otelExporter.recordIntegrityCheck(signal);
+    }
+
+    // 11. Detect drift
+    let driftState: DriftState = createDriftState();
+    const driftResult = detectIntegrityDrift(
+      driftState,
+      checkpoint,
+      window.getState().checkpoints,
+    );
+    driftState = driftResult.state;
+
+    if (driftResult.alert) {
+      summary.drift_alert_active = true;
+    }
+
+    // 12. Attestation
+    const windowContext = window.getState().checkpoints.map((cp: IntegrityCheckpoint) => ({
+      checkpoint_id: cp.checkpoint_id,
+      verdict: cp.verdict,
+      reasoning_summary: cp.reasoning_summary,
+    }));
+    const attestation = await attestCheckpoint(
+      checkpoint, agent, sessionId, thinkingHash,
+      aipCard, values, windowContext, quotaContext, env
+    );
+
+    // 13. Store checkpoint, submit metering, deliver webhooks
+    await storeCheckpoint(checkpoint, 'gateway', env, attestation);
+    await submitMeteringEvent(agent.id, checkpoint.checkpoint_id, 'gateway', env);
+    await deliverWebhooks(checkpoint, env);
+    if (otelExporter) {
+      await otelExporter.flush();
+    }
+
+    // 14. Create nudge for boundary violations
+    if (
+      checkpoint.verdict === 'boundary_violation' &&
+      (enforcementMode === 'nudge' || enforcementMode === 'enforce')
+    ) {
+      const violationCount = await countSessionViolations(agent.id, sessionId, env);
+      if (shouldCreateNudge(agentSettings, violationCount)) {
+        await createPendingNudge(checkpoint, agent.id, sessionId, env);
+      }
+      await checkAutoContainment(agent.id, sessionId, checkpoint, env);
+    }
+
+    console.log(`[gateway/stream-aip] Analysis complete: verdict=${checkpoint.verdict}, cert=${attestation?.certificate_id || 'none'}`);
+  } catch (error) {
+    console.error('[gateway/stream-aip] Background analysis failed (fail-open):', error);
+  }
+}
+
+/**
  * Mark nudges as delivered after successful injection.
  * Called via ctx.waitUntil() after the forward completes.
  */
@@ -1854,10 +2383,29 @@ export async function handleProviderProxy(
       });
     }
 
-    // If streaming, skip AIP (cannot buffer SSE for analysis)
+    // Streaming: tee the stream for background AIP analysis (zero latency impact)
     if (isStreaming) {
-      responseHeaders.set('X-AIP-Verdict', 'skipped');
-      return new Response(response.body, {
+      if (!response.ok || !response.body) {
+        responseHeaders.set('X-AIP-Verdict', 'skipped');
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeaders,
+        });
+      }
+
+      // Tee the stream: one fork to client (immediate), one fork to background analysis
+      const [clientStream, analysisStream] = response.body.tee();
+
+      ctx.waitUntil(
+        analyzeStreamInBackground(
+          analysisStream, provider, agent, sessionId,
+          agentSettings, quotaContext, requestBody, otelExporter, env
+        )
+      );
+
+      responseHeaders.set('X-AIP-Verdict', 'pending');
+      return new Response(clientStream, {
         status: response.status,
         statusText: response.statusText,
         headers: responseHeaders,
@@ -2143,98 +2691,16 @@ export async function handleProviderProxy(
         summary.drift_alert_active = true;
       }
 
-      // ====================================================================
-      // Phase 1 VIE: Cryptographic Checkpoint Attestation
-      // ====================================================================
-      let attestation: AttestationData | undefined;
-      const attestationEnabled = quotaContext.feature_flags?.cryptographic_attestation !== false;
-      try {
-        const signingKeyHex = env.ED25519_SIGNING_KEY;
-        if (signingKeyHex && attestationEnabled) {
-          const signingKeyId = env.ED25519_KEY_ID || 'key-001';
-
-          // 1. Compute input commitment over analysis inputs
-          const inputCommitment = await computeInputCommitment({
-            card: aipCard as unknown as { card_id: string; values: unknown[]; [key: string]: unknown },
-            conscienceValues: (values || []) as Array<{ type: string; content: string; id?: string }>,
-            windowContext: window.getState().checkpoints.map((cp: IntegrityCheckpoint) => ({
-              checkpoint_id: cp.checkpoint_id,
-              verdict: cp.verdict,
-              reasoning_summary: cp.reasoning_summary,
-            })),
-            modelVersion: 'claude-haiku-4-5-20251001',
-            promptTemplateVersion: '1.0.0',
-          });
-
-          // 2. Fetch previous chain hash (genesis if first checkpoint)
-          const prevChainHash = await fetchPrevChainHash(agent.id, sessionId, env);
-
-          // 3. Compute chain hash linking to previous checkpoint
-          const chainHash = await computeChainHash({
-            prevChainHash,
-            checkpointId: checkpoint.checkpoint_id,
-            verdict: checkpoint.verdict,
-            thinkingBlockHash: thinkingHash,
-            inputCommitment,
-            timestamp: checkpoint.timestamp,
-          });
-
-          // 4. Build canonical payload and sign with Ed25519
-          const signedPayload = buildSignedPayload({
-            checkpointId: checkpoint.checkpoint_id,
-            agentId: checkpoint.agent_id,
-            verdict: checkpoint.verdict,
-            thinkingBlockHash: thinkingHash,
-            inputCommitment,
-            chainHash,
-            timestamp: checkpoint.timestamp,
-          });
-          const secretKey = loadSigningKeyFromHex(signingKeyHex);
-          const signatureValue = await ed25519Sign(signedPayload, secretKey);
-
-          // 5. Merkle tree update — append leaf and recompute root
-          const leafHash = computeLeafHash({
-            checkpointId: checkpoint.checkpoint_id,
-            verdict: checkpoint.verdict,
-            thinkingBlockHash: thinkingHash,
-            chainHash,
-            timestamp: checkpoint.timestamp,
-          });
-          const existingLeaves = await fetchMerkleTreeLeaves(agent.id, env);
-          const allLeaves = [...existingLeaves, leafHash];
-          const newTreeState = buildTreeState(allLeaves);
-          const merkleLeafIndex = allLeaves.length - 1;
-
-          // Fire-and-forget: update Merkle tree in DB
-          upsertMerkleTree(
-            agent.id,
-            newTreeState.root,
-            newTreeState.depth,
-            newTreeState.leafCount,
-            leafHash,
-            env
-          );
-
-          // 6. Generate certificate ID
-          const certificateId = generateCertificateId();
-
-          attestation = {
-            input_commitment: inputCommitment,
-            chain_hash: chainHash,
-            prev_chain_hash: prevChainHash,
-            merkle_leaf_index: merkleLeafIndex,
-            certificate_id: certificateId,
-            signature: signatureValue,
-            signing_key_id: signingKeyId,
-          };
-
-          console.log(`[attestation] ${checkpoint.checkpoint_id} cert=${certificateId}`);
-        }
-      } catch (attestError) {
-        // Attestation is fail-open — never block the primary analysis pipeline
-        const errMsg = attestError instanceof Error ? `${attestError.message}\n${attestError.stack}` : String(attestError);
-        console.warn('[gateway/attestation] Attestation failed (fail-open):', errMsg);
-      }
+      // Cryptographic Checkpoint Attestation (extracted to reusable function)
+      const windowContext = window.getState().checkpoints.map((cp: IntegrityCheckpoint) => ({
+        checkpoint_id: cp.checkpoint_id,
+        verdict: cp.verdict,
+        reasoning_summary: cp.reasoning_summary,
+      }));
+      const attestation = await attestCheckpoint(
+        checkpoint, agent, sessionId, thinkingHash,
+        aipCard, values, windowContext, quotaContext, env
+      );
 
       // Set AIP headers
       responseHeaders.set('X-AIP-Verdict', checkpoint.verdict);
@@ -2259,7 +2725,14 @@ export async function handleProviderProxy(
         checkpoint.verdict === 'boundary_violation' &&
         (enforcementMode === 'nudge' || enforcementMode === 'enforce')
       ) {
-        ctx.waitUntil(createPendingNudge(checkpoint, agent.id, sessionId, env));
+        ctx.waitUntil(
+          countSessionViolations(agent.id, sessionId, env).then(violationCount => {
+            if (shouldCreateNudge(agentSettings, violationCount)) {
+              return createPendingNudge(checkpoint, agent.id, sessionId, env);
+            }
+          })
+        );
+        ctx.waitUntil(checkAutoContainment(agent.id, sessionId, checkpoint, env));
       }
 
       // Apply enforcement

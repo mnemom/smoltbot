@@ -10,11 +10,8 @@
  * - Uses detectDrift() to identify behavioral drift patterns
  * - All trace structures conform to APTrace interface
  *
- * AIP SDK Integration:
- * - Uses createClient() + client.check() for real-time integrity analysis
- * - Runs alongside AAP verification (fail-open, non-blocking checkpoint storage)
- * - Stores IntegrityCheckpoints in Supabase integrity_checkpoints table
- * - Enriches AP-Trace metadata with aip_verdict and aip_checkpoint_id
+ * AIP is handled by the gateway via real-time stream interception.
+ * The observer links its traces to gateway-created checkpoints.
  */
 
 import {
@@ -29,16 +26,6 @@ import {
   type DriftAlert,
   type TraceContext,
 } from '@mnemom/agent-alignment-protocol';
-
-import {
-  createClient,
-  DEFAULT_CONSCIENCE_VALUES,
-  type AIPClient,
-  type IntegritySignal,
-  type AIPConfig,
-  type IntegrityCheckpoint,
-  type ConscienceValue,
-} from '@mnemom/agent-integrity-protocol';
 
 import { createWorkersExporter, type WorkersOTelExporter } from '@mnemom/aip-otel-exporter/workers';
 
@@ -333,101 +320,14 @@ async function processLog(
     otelExporter.recordVerification(verification);
   }
 
-  // Check if gateway already created a checkpoint for this session (dedup)
-  let gatewayCheckpointExists = false;
-  try {
-    const dedupRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agent_id}&source=eq.gateway&session_id=eq.${session_id}&order=timestamp.desc&limit=1`,
-      {
-        headers: {
-          apikey: env.SUPABASE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        },
-      }
-    );
-    if (dedupRes.ok) {
-      const existing = (await dedupRes.json()) as unknown[];
-      gatewayCheckpointExists = existing.length > 0;
-    }
-  } catch (error) {
-    // Fail-open: if dedup query fails, proceed with the check anyway
-    console.warn('[observer/aip] Dedup query failed (proceeding with check):', error);
-  }
-
-  // Run AIP integrity check alongside AAP verification (fail-open)
-  let aipSignal: IntegritySignal | null = null;
-  if (gatewayCheckpointExists) {
-    console.log('[observer/aip] Gateway checkpoint exists for session, skipping');
-  } else {
-    console.log(`[observer/aip] Running integrity check for ${agent_id}, provider=${log.provider}, responseLen=${bodies.response.length}, hasCard=${!!card}`);
-    // Build enriched task context (PII-safe: role + tool names + truncated query)
-    const agentRole = (card as any)?.extensions?.mnemom?.description
-      || (card as any)?.extensions?.mnemom?.role
-      || '';
-    const toolNames = context.toolCalls.length > 0
-      ? context.toolCalls.map(t => t.name).join(', ')
-      : '';
-    const userQueryTruncated = context.userQuery
-      ? context.userQuery.slice(0, 200)
-      : '';
-    const taskParts = [
-      agentRole ? `${agentRole}.` : '',
-      toolNames ? `Currently: ${toolNames}.` : '',
-      userQueryTruncated ? `User request: ${userQueryTruncated}` : '',
-    ].filter(Boolean);
-    const taskContext = taskParts.length > 0 ? taskParts.join(' ') : undefined;
-
-    // Fetch recent checkpoints for window hydration
-    const recentCheckpoints = await fetchRecentCheckpoints(agent_id, session_id, env);
-
-    aipSignal = await runIntegrityCheck(
-      bodies.response,
-      log.provider,
-      agent_id,
-      card,
-      env,
-      taskContext,
-      recentCheckpoints
-    );
-    console.log(`[observer/aip] runIntegrityCheck returned: ${aipSignal ? `verdict=${aipSignal.checkpoint.verdict}` : 'null'}`);
-
-    if (aipSignal && otelExporter) {
-      otelExporter.recordIntegrityCheck(aipSignal);
-    }
-  }
-
-  // Enrich trace metadata with AIP results before submission
-  if (aipSignal && trace.context?.metadata) {
-    const traceMetadata = trace.context.metadata as Record<string, unknown>;
-    traceMetadata.aip_verdict = aipSignal.checkpoint.verdict;
-    traceMetadata.aip_checkpoint_id = aipSignal.checkpoint.checkpoint_id;
-  }
-
   // Submit trace to Supabase (trace + verification stored separately)
   await submitTrace(trace, verification, log, env);
 
   // Submit usage event for admin tracking (non-blocking)
   ctx.waitUntil(submitUsageEvent(trace, log, env));
 
-  // Submit AIP checkpoint to Supabase (non-blocking, same pattern as drift)
-  // Override agent_id: SDK uses card_id as proxy, but DB FK references agents(id)
-  // Link checkpoint to its corresponding trace for unified timeline
-  if (aipSignal) {
-    aipSignal.checkpoint.agent_id = agent_id;
-    aipSignal.checkpoint.linked_trace_id = trace.trace_id;
-    ctx.waitUntil(submitCheckpoint(aipSignal.checkpoint, env));
-    ctx.waitUntil(submitMeteringEvent(agent_id, aipSignal.checkpoint.checkpoint_id, 'observer', env));
-
-    // Create pending nudge for boundary violations (if enforcement mode is nudge/enforce)
-    if (aipSignal.checkpoint.verdict === 'boundary_violation') {
-      ctx.waitUntil(createNudgeIfEnabled(aipSignal.checkpoint, agent_id, session_id, env));
-    }
-
-    // Auto-containment: check if consecutive boundary violations exceed threshold
-    if (aipSignal.checkpoint.verdict === 'boundary_violation') {
-      ctx.waitUntil(checkAutoContainment(agent_id, session_id, aipSignal.checkpoint, env));
-    }
-  }
+  // Link gateway-created checkpoint to this trace (gateway handles all AIP analysis now)
+  ctx.waitUntil(linkCheckpointToTrace(agent_id, session_id, trace.trace_id, env));
 
   // Check for behavioral drift (runs in background)
   ctx.waitUntil(checkForDrift(agent_id, card, env, otelExporter));
@@ -435,8 +335,7 @@ async function processLog(
   // Delete processed log for privacy
   await deleteLog(log.id, env);
 
-  console.log(`[observer] Created trace ${trace.trace_id} for agent ${agent_id}` +
-    (aipSignal ? ` (AIP: ${aipSignal.checkpoint.verdict})` : ''));
+  console.log(`[observer] Created trace ${trace.trace_id} for agent ${agent_id}`);
 
   return true;
 }
@@ -1316,435 +1215,40 @@ async function submitUsageEvent(
 // ============================================================================
 
 /**
- * Extract agent description from AAP card extensions (PII-safe).
- * Searches extension namespaces for a 'description' field describing the agent's role.
+ * Link a gateway-created checkpoint to an observer trace.
+ * The gateway creates AIP checkpoints in real-time; the observer links
+ * its AAP traces to those checkpoints after processing the log.
  */
-function extractAgentDescription(card: AlignmentCard): string | undefined {
-  const extensions = card.extensions as Record<string, unknown> | null | undefined;
-  if (!extensions) return undefined;
-  for (const ns of Object.values(extensions)) {
-    if (ns && typeof ns === 'object' && 'description' in (ns as Record<string, unknown>)) {
-      const desc = (ns as Record<string, unknown>).description;
-      if (typeof desc === 'string') return desc;
-    }
-  }
-  return undefined;
-}
-
-/**
- * Fetch org-level conscience values for an agent.
- * Uses KV cache (5-min TTL) → Supabase RPC. Fail-open: returns null on error.
- */
-async function fetchOrgConscienceValues(
-  agentId: string,
-  env: Env
-): Promise<{ enabled: boolean; mode?: string; values?: Array<{ name: string; description: string; type: string; severity: string }> } | null> {
-  const cacheKey = `org-cv:agent:${agentId}`;
-  try {
-    // Check KV cache first
-    if ((env as any).BILLING_CACHE) {
-      const cached = await ((env as any).BILLING_CACHE as KVNamespace).get(cacheKey);
-      if (cached) {
-        return JSON.parse(cached);
-      }
-    }
-
-    // Call RPC
-    const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/get_org_conscience_values_for_agent`, {
-      method: 'POST',
-      headers: {
-        apikey: env.SUPABASE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ p_agent_id: agentId }),
-    });
-
-    if (!response.ok) {
-      console.warn(`[observer/cv] RPC failed for ${agentId}: ${response.status}`);
-      return { enabled: false };
-    }
-
-    const result = await response.json() as Record<string, unknown>;
-
-    // Cache for 5 minutes
-    if ((env as any).BILLING_CACHE) {
-      await ((env as any).BILLING_CACHE as KVNamespace).put(cacheKey, JSON.stringify(result), { expirationTtl: 300 }).catch(() => {});
-    }
-
-    return result as any;
-  } catch (error) {
-    console.warn('[observer/cv] fetchOrgConscienceValues failed (fail-open):', error);
-    return { enabled: false };
-  }
-}
-
-/**
- * Run an AIP integrity check on the response body.
- * Creates an ephemeral AIP client, runs the check, and destroys the client.
- * Fail-open: returns null on any error so existing processing is unaffected.
- *
- * Conscience values resolution (layered, additive):
- * 1. Base: DEFAULT_CONSCIENCE_VALUES (augment mode) or empty (replace mode)
- * 2. Org layer: Custom org values — always applied
- * 3. Agent layer: Per-agent conscience_values from alignment card (additive)
- */
-async function runIntegrityCheck(
-  responseBody: string,
-  provider: string,
-  agentId: string,
-  card: AlignmentCard | null,
-  env: Env,
-  taskContext?: string,
-  initialCheckpoints?: any[]
-): Promise<IntegritySignal | null> {
-  if (!card) {
-    console.log('[observer/aip] Skipping integrity check: no alignment card');
-    return null;
-  }
-
-  let client: AIPClient | null = null;
-
-  try {
-    const analysisApiKey = env.ANALYSIS_API_KEY || env.ANTHROPIC_API_KEY;
-    // Analysis always uses Anthropic Haiku — ensure correct provider path in CF AI Gateway URL
-    const analysisBaseUrl = env.CF_AI_GATEWAY_URL
-      ? `${env.CF_AI_GATEWAY_URL.replace(/\/(anthropic|openai|gemini)\/?$/, '')}/anthropic`
-      : 'https://api.anthropic.com';
-
-    // Map AAP AlignmentCard fields to AIP's card interface
-    // Include value definitions and agent description for analysis context (PII-safe)
-    const defs = card.values.definitions as Record<string, { name?: string; description?: string; priority?: number }> | null | undefined;
-    const aipCard = {
-      card_id: card.card_id,
-      agent_description: extractAgentDescription(card),
-      values: (card.values.declared || []).map((v: string, i: number) => {
-        const def = defs?.[v];
-        return {
-          name: v,
-          priority: def?.priority ?? (i + 1),
-          ...(def?.description ? { description: def.description } : {}),
-        };
-      }),
-      autonomy_envelope: {
-        bounded_actions: card.autonomy_envelope.bounded_actions,
-        forbidden_actions: card.autonomy_envelope.forbidden_actions ?? undefined,
-        escalation_triggers: card.autonomy_envelope.escalation_triggers?.map(
-          (t: { condition: string; action: string; reason?: string | null }) => ({
-            condition: t.condition,
-            action: t.action,
-            reason: t.reason ?? undefined,
-          })
-        ),
-      },
-    };
-
-    // Layered conscience values resolution
-    // 1. Base: defaults (augment) or empty (replace)
-    // 2. Org layer: custom org values (always applied)
-    // 3. Agent layer: per-agent values from alignment card (additive)
-    const orgCv = await fetchOrgConscienceValues(agentId, env);
-    let resolvedValues: ConscienceValue[] = [...DEFAULT_CONSCIENCE_VALUES] as unknown as ConscienceValue[];
-    if (orgCv && orgCv.enabled && orgCv.values && orgCv.values.length > 0) {
-      const mapped: ConscienceValue[] = orgCv.values.map(v => ({
-        id: v.name,
-        content: v.description,
-        type: v.type as ConscienceValue['type'],
-      }));
-      if (orgCv.mode === 'replace') {
-        resolvedValues = mapped;
-      } else {
-        // augment: defaults + org values
-        resolvedValues = [...(DEFAULT_CONSCIENCE_VALUES as unknown as ConscienceValue[]), ...mapped];
-      }
-    }
-    // Per-agent values from alignment card are additive on top
-    const agentCv = (card as any)?.conscience_values;
-    if (Array.isArray(agentCv) && agentCv.length > 0) {
-      resolvedValues = [...resolvedValues, ...agentCv];
-    }
-
-    // Note: initial_checkpoints will be a recognized AIPConfig field once AIP SDK v0.1.5 lands
-    const config: AIPConfig & { initial_checkpoints?: any[] } = {
-      card: aipCard,
-      conscience_values: resolvedValues,
-      initial_checkpoints: initialCheckpoints,
-      min_evidence_tokens: 25, // ~100 chars — analyze any real sentence of reasoning
-      analysis_llm: {
-        model: 'claude-haiku-4-5-20251001',
-        base_url: analysisBaseUrl,
-        api_key: analysisApiKey,
-        max_tokens: 1024,
-        enable_prompt_caching: true,
-      },
-      window: {
-        max_size: 10,
-        mode: 'sliding',
-        session_boundary: 'reset',
-        max_age_seconds: 3600,
-      },
-      failure_policy: {
-        mode: 'fail_open',
-        analysis_timeout_ms: 8000, // Slightly under CF Worker 10s subrequest limit
-      },
-    };
-
-    client = createClient(config);
-    const signal = await client.check(responseBody, provider, taskContext);
-
-    console.log(
-      `[observer/aip] Integrity check complete: verdict=${signal.checkpoint.verdict}, ` +
-      `proceed=${signal.proceed}, action=${signal.recommended_action}`
-    );
-
-    return signal;
-  } catch (error) {
-    console.error('[observer/aip] Integrity check failed (fail-open):', error);
-    return null;
-  } finally {
-    if (client) {
-      client.destroy();
-    }
-  }
-}
-
-/**
- * Check if an agent should be auto-contained based on consecutive boundary violations.
- * Fire-and-forget via ctx.waitUntil() — failure never blocks the observer pipeline.
- */
-async function checkAutoContainment(
+async function linkCheckpointToTrace(
   agentId: string,
   sessionId: string,
-  checkpoint: IntegrityCheckpoint,
-  env: Env
-): Promise<void> {
-  try {
-    // Fetch agent's auto-containment threshold and current status
-    const agentRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=auto_containment_threshold,containment_status`,
-      {
-        headers: {
-          apikey: env.SUPABASE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        },
-      }
-    );
-
-    if (!agentRes.ok) return;
-
-    const agents = (await agentRes.json()) as Array<Record<string, unknown>>;
-    if (agents.length === 0) return;
-
-    const agent = agents[0];
-    const threshold = agent.auto_containment_threshold as number | null;
-    const currentStatus = agent.containment_status as string;
-
-    // Skip if auto-containment disabled or agent already contained
-    if (!threshold || currentStatus === 'paused' || currentStatus === 'killed') return;
-
-    // Count consecutive boundary_violation checkpoints for this agent (most recent first)
-    // Using gaps-and-islands: count from the latest checkpoint backwards until a non-violation
-    const checkpointRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&order=created_at.desc&limit=${threshold + 5}&select=verdict`,
-      {
-        headers: {
-          apikey: env.SUPABASE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        },
-      }
-    );
-
-    if (!checkpointRes.ok) return;
-
-    const checkpoints = (await checkpointRes.json()) as Array<{ verdict: string }>;
-
-    // Count consecutive boundary_violations from the start
-    let consecutiveCount = 0;
-    for (const cp of checkpoints) {
-      if (cp.verdict === 'boundary_violation') {
-        consecutiveCount++;
-      } else {
-        break;
-      }
-    }
-
-    if (consecutiveCount < threshold) return;
-
-    console.log(`[observer/containment] Auto-pausing agent ${agentId}: ${consecutiveCount} consecutive boundary violations (threshold: ${threshold})`);
-
-    // Auto-pause the agent
-    const now = new Date().toISOString();
-    const reason = `Auto-contained: ${consecutiveCount} consecutive boundary violations`;
-
-    const updateUrl = new URL(`${env.SUPABASE_URL}/rest/v1/agents`);
-    updateUrl.searchParams.set('id', `eq.${agentId}`);
-
-    await fetch(updateUrl.toString(), {
-      method: 'PATCH',
-      headers: {
-        apikey: env.SUPABASE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify({
-        containment_status: 'paused',
-        contained_at: now,
-        contained_by: 'system',
-        containment_reason: reason,
-      }),
-    });
-
-    // Insert containment audit log
-    const logId = `ctl-${Array.from(crypto.getRandomValues(new Uint8Array(6))).map(b => b.toString(16).padStart(2, '0')).join('')}`;
-
-    await fetch(`${env.SUPABASE_URL}/rest/v1/agent_containment_log`, {
-      method: 'POST',
-      headers: {
-        apikey: env.SUPABASE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify({
-        id: logId,
-        agent_id: agentId,
-        action: 'auto_pause',
-        actor: 'system',
-        reason,
-        previous_status: currentStatus,
-        new_status: 'paused',
-        metadata: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id }),
-      }),
-    });
-
-    // Purge KV cache if available
-    // Note: observer may not have BILLING_CACHE bound — this is best-effort
-    if ((env as any).BILLING_CACHE) {
-      await ((env as any).BILLING_CACHE as KVNamespace).delete(`quota:agent:${agentId}`).catch(() => {});
-    }
-
-    console.log(`[observer/containment] Agent ${agentId} auto-paused successfully`);
-  } catch (err) {
-    // Fail-open: auto-containment failure never blocks the observer
-    console.warn('[observer/containment] checkAutoContainment error (fail-open):', err);
-  }
-}
-
-/**
- * Submit an AIP IntegrityCheckpoint to the integrity_checkpoints Supabase table.
- * Uses the same upsert pattern as submitTrace for idempotency.
- */
-async function submitCheckpoint(
-  checkpoint: IntegrityCheckpoint,
+  traceId: string,
   env: Env
 ): Promise<void> {
   try {
     const response = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?on_conflict=checkpoint_id`,
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&session_id=eq.${sessionId}&linked_trace_id=is.null&order=timestamp.desc&limit=1`,
       {
-        method: 'POST',
+        method: 'PATCH',
         headers: {
           apikey: env.SUPABASE_KEY,
           Authorization: `Bearer ${env.SUPABASE_KEY}`,
           'Content-Type': 'application/json',
-          Prefer: 'resolution=merge-duplicates,return=minimal',
+          Prefer: 'return=minimal',
         },
-        body: JSON.stringify({
-          checkpoint_id: checkpoint.checkpoint_id,
-          agent_id: checkpoint.agent_id,
-          card_id: checkpoint.card_id,
-          session_id: checkpoint.session_id,
-          timestamp: checkpoint.timestamp,
-          thinking_block_hash: checkpoint.thinking_block_hash,
-          provider: checkpoint.provider,
-          model: checkpoint.model,
-          verdict: checkpoint.verdict,
-          concerns: checkpoint.concerns,
-          reasoning_summary: checkpoint.reasoning_summary,
-          conscience_context: checkpoint.conscience_context,
-          window_position: checkpoint.window_position,
-          analysis_metadata: checkpoint.analysis_metadata,
-          linked_trace_id: checkpoint.linked_trace_id,
-          source: 'observer',
-        }),
+        body: JSON.stringify({ linked_trace_id: traceId }),
       }
     );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.warn(
-        `[observer/aip] Failed to submit checkpoint ${checkpoint.checkpoint_id}: ${response.status} - ${errorText}`
-      );
-    } else {
-      console.log(`[observer/aip] Checkpoint ${checkpoint.checkpoint_id} stored`);
+    if (response.ok) {
+      console.log(`[observer] Linked checkpoint to trace ${traceId}`);
     }
   } catch (error) {
-    console.error('[observer/aip] Error submitting checkpoint:', error);
+    // Fail-open: linking is best-effort
+    console.warn('[observer] Failed to link checkpoint to trace:', error);
   }
 }
 
-/**
- * Submit a metering event for billing. Non-blocking, fail-open.
- */
-async function submitMeteringEvent(
-  agentId: string,
-  checkpointId: string,
-  source: string,
-  env: Env
-): Promise<void> {
-  try {
-    // Resolve agent → billing account
-    const rpcResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/get_billing_account_for_agent`, {
-      method: 'POST',
-      headers: {
-        apikey: env.SUPABASE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ p_agent_id: agentId }),
-    });
-
-    if (!rpcResponse.ok) {
-      console.warn(`[observer/metering] Failed to resolve billing account for agent ${agentId}`);
-      return;
-    }
-
-    const result = (await rpcResponse.json()) as { account_id: string | null };
-    if (!result.account_id) return;
-
-    // Generate event ID
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    let eventIdSuffix = '';
-    for (let i = 0; i < 8; i++) {
-      eventIdSuffix += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-
-    // Insert metering event
-    const insertResponse = await fetch(`${env.SUPABASE_URL}/rest/v1/metering_events`, {
-      method: 'POST',
-      headers: {
-        apikey: env.SUPABASE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify({
-        event_id: `me-${eventIdSuffix}`,
-        account_id: result.account_id,
-        agent_id: agentId,
-        event_type: 'integrity_check',
-        metadata: { checkpoint_id: checkpointId, source },
-      }),
-    });
-
-    if (!insertResponse.ok) {
-      console.warn(`[observer/metering] Failed to insert metering event: ${insertResponse.status}`);
-    }
-  } catch (error) {
-    console.warn('[observer/metering] Error submitting metering event:', error);
-  }
-}
 
 /**
  * Trigger metering rollup for all active billing accounts.
@@ -1983,39 +1487,6 @@ async function reportDailyUsageToStripe(env: Env): Promise<void> {
 }
 
 /**
- * Fetch recent checkpoints for window hydration (same pattern as gateway).
- */
-async function fetchRecentCheckpoints(
-  agentId: string,
-  sessionId: string,
-  env: Env
-): Promise<any[]> {
-  try {
-    const response = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&session_id=eq.${sessionId}&order=timestamp.desc&limit=10`,
-      {
-        headers: {
-          apikey: env.SUPABASE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        },
-      }
-    );
-
-    if (!response.ok) {
-      console.warn(`[observer/aip] Failed to fetch checkpoints for hydration: ${response.status}`);
-      return [];
-    }
-
-    const rows = (await response.json()) as any[];
-    // Reverse to chronological order (oldest first) for window hydration
-    return rows.reverse();
-  } catch (error) {
-    console.error(`[observer/aip] Error fetching checkpoints for hydration:`, error);
-    return [];
-  }
-}
-
-/**
  * Check for behavioral drift across recent traces
  */
 async function checkForDrift(
@@ -2217,82 +1688,6 @@ function buildTrace(
 // Enforcement Nudge Functions
 // ============================================================================
 
-/**
- * Check enforcement mode and create a pending nudge if enabled.
- * Fetches enforcement mode from agents table, then creates nudge record.
- */
-async function createNudgeIfEnabled(
-  checkpoint: IntegrityCheckpoint,
-  agentId: string,
-  sessionId: string,
-  env: Env
-): Promise<void> {
-  try {
-    // Fetch enforcement mode
-    const response = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/agents?id=eq.${agentId}&select=aip_enforcement_mode&limit=1`,
-      {
-        headers: {
-          apikey: env.SUPABASE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_KEY}`,
-        },
-      }
-    );
-
-    if (!response.ok) {
-      console.warn(`[observer/nudge] Failed to fetch enforcement mode: ${response.status}`);
-      return;
-    }
-
-    const agents = (await response.json()) as Array<{ aip_enforcement_mode?: string }>;
-    const mode = agents[0]?.aip_enforcement_mode || 'observe';
-
-    if (mode !== 'nudge' && mode !== 'enforce') return;
-
-    // Build nudge content
-    const nudgeId = `nudge-${randomHex(8)}`;
-    const concerns = checkpoint.concerns || [];
-    const concernsSummary = concerns.length > 0
-      ? concerns.map((c: any) => `${c.category || 'unknown'}: ${c.description || 'unspecified'}`).join('; ')
-      : 'Boundary violation detected';
-
-    const nudgeContent = `[INTEGRITY NOTICE — Conscience Protocol]\n` +
-      `Your previous response (checkpoint ${checkpoint.checkpoint_id}) was flagged as a boundary violation.\n` +
-      `Concern: ${concernsSummary}\n` +
-      `Review your approach and self-correct. This notice is visible in your transparency timeline.`;
-
-    const createResponse = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/enforcement_nudges`,
-      {
-        method: 'POST',
-        headers: {
-          apikey: env.SUPABASE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_KEY}`,
-          'Content-Type': 'application/json',
-          Prefer: 'return=minimal',
-        },
-        body: JSON.stringify({
-          id: nudgeId,
-          agent_id: agentId,
-          checkpoint_id: checkpoint.checkpoint_id,
-          session_id: sessionId,
-          status: 'pending',
-          nudge_content: nudgeContent,
-          concerns_summary: concernsSummary,
-        }),
-      }
-    );
-
-    if (!createResponse.ok) {
-      const errorText = await createResponse.text();
-      console.warn(`[observer/nudge] Failed to create nudge: ${createResponse.status} - ${errorText}`);
-    } else {
-      console.log(`[observer/nudge] Created pending nudge ${nudgeId} for checkpoint ${checkpoint.checkpoint_id}`);
-    }
-  } catch (error) {
-    console.error('[observer/nudge] Error creating nudge:', error);
-  }
-}
 
 /**
  * Expire stale pending nudges older than 4 hours.
