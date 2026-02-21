@@ -2019,7 +2019,12 @@ async function callAnalysisLLM(
     }
 
     const body = (await response.json()) as Record<string, unknown>;
+    const stopReason = body.stop_reason as string | undefined;
     const content = body.content as Array<Record<string, unknown>> | undefined;
+
+    if (stopReason === 'max_tokens') {
+      console.warn(`[gateway/aip] Analysis LLM hit max_tokens — response may be truncated`);
+    }
 
     if (!content || content.length === 0) {
       throw new Error('Analysis LLM returned empty content');
