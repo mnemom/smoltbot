@@ -99,7 +99,7 @@ jobs:
 
   deploy-prover:
     name: Deploy Prover
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-8-core
     needs: [test, changes]
     if: needs.changes.outputs.prover == 'true'
     environment: production
