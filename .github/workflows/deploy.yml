@@ -7,41 +7,24 @@ jobs:
   changes:
     name: Detect Changes
     runs-on: ubuntu-latest
-    environment: production
     outputs:
       prover: ${{ steps.check.outputs.prover }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 20
 
-      - name: Install Flyctl
-        uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Check for prover/zkvm changes since last deploy
+      - name: Check for prover/zkvm changes
         id: check
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          # Get the image digest currently running on Fly
-          DEPLOYED=$(flyctl status --app mnemom-prover --json 2>/dev/null | jq -r '.Machines[0].config.image // empty' || true)
-          # Extract the SHA from the tag (deployment-<sha>)
-          DEPLOYED_SHA=$(echo "$DEPLOYED" | grep -oP 'deployment-\K[0-9a-f]+' || true)
-
-          if [ -n "$DEPLOYED_SHA" ] && git cat-file -t "$DEPLOYED_SHA" &>/dev/null; then
-            echo "Comparing HEAD against deployed commit $DEPLOYED_SHA"
-            CHANGED=$(git diff --name-only "$DEPLOYED_SHA" HEAD | grep -cE '^(prover/|zkvm/|\.github/workflows/deploy\.yml)' || true)
-          else
-            echo "No deployed SHA found or commit not in history — will deploy"
-            CHANGED=1
-          fi
-
+          # Check last 20 commits for prover-related changes
+          CHANGED=$(git log --oneline --name-only -20 | grep -cE '^(prover/|zkvm/|\.github/workflows/deploy\.yml)' || true)
           if [ "$CHANGED" -gt 0 ]; then
             echo "prover=true" >> "$GITHUB_OUTPUT"
             echo "Prover-related changes detected — will deploy prover"
           else
             echo "prover=false" >> "$GITHUB_OUTPUT"
-            echo "No prover-related changes since last deploy — skipping"
+            echo "No prover-related changes in last 20 commits — skipping"
           fi
 
   test:
