@@ -46,6 +46,42 @@ import {
 import { readStreamToText, parseSSEEvents } from './sse-parser';
 
 // ============================================================================
+// Analysis Helpers
+// ============================================================================
+
+/**
+ * Sanitize JSON text by removing trailing commas before } or ].
+ * Haiku 4.5 occasionally produces trailing commas in JSON arrays/objects.
+ */
+function sanitizeJson(text: string): string {
+  return text.replace(/,\s*([}\]])/g, '$1');
+}
+
+/**
+ * Pre-filter to skip analysis for trivial thinking blocks.
+ * Lightweight first stage of a two-stage cascade — cuts API costs for
+ * the ~30-40% of interactions with trivial thinking blocks.
+ */
+function shouldSkipAnalysis(thinkingBlock: string): boolean {
+  const tokenEstimate = Math.ceil(thinkingBlock.length / 4);
+  if (tokenEstimate < 50) return true;
+  if (tokenEstimate < 100 && /^(I'll |Let me |Sure, |OK, |Here's )/i.test(thinkingBlock.trim())) return true;
+  return false;
+}
+
+// ============================================================================
+// Analysis Circuit Breaker
+// ============================================================================
+
+const analysisCircuitBreaker = {
+  failures: 0,
+  lastFailure: 0,
+  isOpen: false,
+  threshold: 5,
+  resetAfterMs: 60000,
+};
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -1729,12 +1765,25 @@ async function analyzeStreamInBackground(
       taskContext: gatewayTaskContext,
     });
 
-    const analysisStartTime = Date.now();
-    const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
-    const analysisDurationMs = Date.now() - analysisStartTime;
+    // Pre-filter: skip Haiku call for trivial thinking blocks
+    let analysisResponseText: string;
+    let analysisDurationMs: number;
+    if (shouldSkipAnalysis(parsed.thinking)) {
+      analysisResponseText = JSON.stringify({
+        verdict: 'clear',
+        concerns: [],
+        reasoning_summary: 'Trivial thinking block — skipped analysis',
+        conscience_context: { values_checked: [], conflicts: [], supports: [], considerations: ['Pre-filtered: thinking block too short for meaningful analysis'], consultation_depth: 'surface' },
+      });
+      analysisDurationMs = 0;
+    } else {
+      const analysisStartTime = Date.now();
+      const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
+      analysisDurationMs = Date.now() - analysisStartTime;
 
-    const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
-    const analysisResponseText = jsonMatch ? jsonMatch[0] : rawAnalysisResponse;
+      const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
+      analysisResponseText = jsonMatch ? sanitizeJson(jsonMatch[0]) : rawAnalysisResponse;
+    }
 
     // 10. Build checkpoint
     const windowState = window.getState();
@@ -1878,15 +1927,25 @@ async function markNudgesDelivered(
 /**
  * Call analysis LLM (Haiku) with system+user prompt.
  * POSTs directly to Anthropic API (NOT through the gateway — that would be recursive).
- * Uses AbortController with 8000ms timeout.
+ * Uses AbortController with 10000ms timeout.
  */
 async function callAnalysisLLM(
   system: string,
   user: string,
   env: Env
 ): Promise<string> {
+  // Circuit breaker: skip calls during sustained API failures
+  if (analysisCircuitBreaker.isOpen) {
+    if (Date.now() - analysisCircuitBreaker.lastFailure > analysisCircuitBreaker.resetAfterMs) {
+      analysisCircuitBreaker.isOpen = false;
+      analysisCircuitBreaker.failures = 0;
+    } else {
+      throw new Error('Analysis circuit breaker open — skipping call');
+    }
+  }
+
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 8000);
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1898,7 +1957,7 @@ async function callAnalysisLLM(
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1024,
+        max_tokens: 512,
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: user }],
       }),
@@ -1922,7 +1981,19 @@ async function callAnalysisLLM(
       throw new Error('Analysis LLM returned no text content');
     }
 
+    // Reset circuit breaker on success
+    analysisCircuitBreaker.failures = 0;
+
     return textBlock.text;
+  } catch (error) {
+    // Track failures for circuit breaker
+    analysisCircuitBreaker.failures++;
+    analysisCircuitBreaker.lastFailure = Date.now();
+    if (analysisCircuitBreaker.failures >= analysisCircuitBreaker.threshold) {
+      analysisCircuitBreaker.isOpen = true;
+      console.warn(`[gateway/aip] Circuit breaker OPEN after ${analysisCircuitBreaker.failures} consecutive failures`);
+    }
+    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -2729,14 +2800,26 @@ export async function handleProviderProxy(
         taskContext: gatewayTaskContext,
       });
 
-      // Call analysis LLM (Haiku)
-      const analysisStartTime = Date.now();
-      const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
-      const analysisDurationMs = Date.now() - analysisStartTime;
+      // Pre-filter: skip Haiku call for trivial thinking blocks
+      let analysisResponseText: string;
+      let analysisDurationMs: number;
+      if (shouldSkipAnalysis(thinking.content)) {
+        analysisResponseText = JSON.stringify({
+          verdict: 'clear',
+          concerns: [],
+          reasoning_summary: 'Trivial thinking block — skipped analysis',
+          conscience_context: { values_checked: [], conflicts: [], supports: [], considerations: ['Pre-filtered: thinking block too short for meaningful analysis'], consultation_depth: 'surface' },
+        });
+        analysisDurationMs = 0;
+      } else {
+        const analysisStartTime = Date.now();
+        const rawAnalysisResponse = await callAnalysisLLM(prompt.system, prompt.user, env);
+        analysisDurationMs = Date.now() - analysisStartTime;
 
-      // Strip markdown code fences if present (claude-haiku-4-5 wraps JSON in ```json...```)
-      const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
-      const analysisResponseText = jsonMatch ? jsonMatch[0] : rawAnalysisResponse;
+        // Strip markdown code fences if present (claude-haiku-4-5 wraps JSON in ```json...```)
+        const jsonMatch = rawAnalysisResponse.match(/\{[\s\S]*\}/);
+        analysisResponseText = jsonMatch ? sanitizeJson(jsonMatch[0]) : rawAnalysisResponse;
+      }
 
       // Hash thinking block using Web Crypto API
       const thinkingHash = await sha256(thinking.content);

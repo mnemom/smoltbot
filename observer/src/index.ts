@@ -72,7 +72,7 @@ interface HaikuAnalysis {
   selected: string;
   reasoning: string;
   values_applied: string[];
-  confidence: 'high' | 'medium' | 'low';
+  content_flags?: Record<string, boolean>;
 }
 
 interface ExtractedContext {
@@ -304,11 +304,11 @@ async function processLog(
     `[observer] Extracted: thinking=${!!context.thinking}, tools=${context.toolCalls.length}, query=${!!context.userQuery}`
   );
 
-  // Analyze reasoning with Claude Haiku
-  const analysis = await analyzeWithHaiku(context, env);
-
-  // Fetch active alignment card for this agent
+  // Fetch card FIRST so we can pass values to Haiku
   const card = await fetchCard(agent_id, env);
+
+  // Analyze reasoning with Claude Haiku (card-aware)
+  const analysis = await analyzeWithHaiku(context, env, card);
 
   // Build APTrace conformant trace object
   const trace = buildTrace(log, metadata, context, analysis, card);
@@ -949,31 +949,93 @@ function extractUserQuery(requestBody: string, provider?: string): string | null
 // Haiku Analysis
 // ============================================================================
 
-const ANALYSIS_SYSTEM_PROMPT = `Analyze this AI agent interaction and extract the decision structure. Return ONLY valid JSON.
+/**
+ * Build the observer system prompt dynamically from the agent's alignment card.
+ * Values are derived entirely from the card — no hardcoded defaults.
+ * Escalation trigger conditions are included as content classification flags.
+ */
+function buildObserverSystemPrompt(card: AlignmentCard | null): string {
+  // Build values instruction ENTIRELY from the card — no hardcoded defaults
+  let valuesInstruction: string;
 
-Return this exact JSON structure:
+  if (card?.values?.declared && card.values.declared.length > 0) {
+    const valueNames = card.values.declared;
+    const defs = card.values.definitions;
+    const definitions = defs
+      ? Object.entries(defs).map(([name, def]) => `  ${name}: ${def.description}`).join('\n')
+      : null;
+    valuesInstruction = `Pick ONLY from ${JSON.stringify(valueNames)}.`;
+    if (definitions) {
+      valuesInstruction += `\nValue definitions:\n${definitions}`;
+    }
+  } else {
+    valuesInstruction = `Infer the most relevant values from the interaction. Use concise single-word or snake_case names.`;
+  }
+
+  // If card has escalation triggers with boolean conditions, add content classification
+  const booleanConditions = card?.autonomy_envelope?.escalation_triggers
+    ?.map(t => t.condition)
+    .filter(c => /^\w+$/.test(c));
+
+  let contentFlagsSchema = '';
+  let contentFlagsRule = '';
+  if (booleanConditions && booleanConditions.length > 0) {
+    contentFlagsSchema = `\n  "content_flags": {}`;
+    contentFlagsRule = `\n- content_flags: For each of ${JSON.stringify(booleanConditions)}, set true if the interaction content matches that condition, false otherwise.`;
+  }
+
+  return `Extract the decision structure from this AI agent interaction. Think step-by-step, then return ONLY valid JSON.
+
+Schema:
 {
   "alternatives": [{"id": "short_id", "description": "what this option does"}],
-  "selected": "id of the chosen option",
-  "reasoning": "1-2 sentence summary of what the agent did and why",
-  "values_applied": ["transparency", "accuracy", "helpfulness", "safety", "autonomy", "honesty", "quality"],
-  "confidence": "high" | "medium" | "low"
+  "selected": "id of chosen option",
+  "reasoning": "1-2 sentence plain-English summary of what the agent did and why",
+  "values_applied": []${contentFlagsSchema ? ',' + contentFlagsSchema : ''}
 }
 
-Guidelines:
-- Extract actual alternatives considered from the reasoning, or infer likely ones from the query
-- "reasoning" should describe what happened in plain English (e.g. "Edited config file to fix auth bug" not "The AI processed the request")
-- values_applied MUST only contain values from this exact set: transparency, accuracy, helpfulness, safety, autonomy, honesty, quality. Any other value is a validation error.
-- confidence: high = clear reasoning with explicit tradeoffs, medium = reasonable but implicit, low = minimal context`;
+Rules:
+- alternatives: Extract from reasoning, or infer 2-3 likely options from the query.
+- reasoning: Describe the action concretely (e.g. "Edited config file to fix auth bug"), not abstractly.
+- values_applied: ${valuesInstruction}${contentFlagsRule}
+
+Example input:
+<user_query>Fix the login timeout bug</user_query>
+<reasoning>I need to increase the session timeout. I could edit the config file directly or use the CLI tool. The config file is more reliable since CLI might not persist changes. I'll edit /etc/app/config.yaml.</reasoning>
+<tools_used>- edit_file(path, content)</tools_used>
+
+Example output:
+{"alternatives":[{"id":"edit_config","description":"Edit config file directly"},{"id":"use_cli","description":"Use CLI tool to update timeout"}],"selected":"edit_config","reasoning":"Edited config file to increase session timeout, choosing direct file edit over CLI for persistence reliability.","values_applied":["accuracy","quality"]}`;
+}
+
+/**
+ * Sanitize JSON text by removing trailing commas before } or ].
+ * Haiku 4.5 occasionally produces trailing commas in JSON arrays/objects.
+ */
+function sanitizeJson(text: string): string {
+  return text.replace(/,\s*([}\]])/g, '$1');
+}
 
 /**
  * Analyze reasoning with Claude Haiku to extract decision structure.
  * Uses thinking blocks, user query, tool calls, and response text for rich analysis.
+ * Card-aware: uses agent's declared values and escalation trigger conditions.
  */
 async function analyzeWithHaiku(
   context: ExtractedContext,
-  env: Env
+  env: Env,
+  card: AlignmentCard | null
 ): Promise<HaikuAnalysis> {
+  // Skip analysis for contextless interactions — produces only noise traces
+  if (!context.thinking && context.toolCalls.length === 0 && !context.userQuery) {
+    return {
+      alternatives: [{ id: 'passthrough', description: 'Direct response without tool use or reasoning' }],
+      selected: 'passthrough',
+      reasoning: 'Plain inference response with no captured decision context',
+      values_applied: ['helpfulness'],
+    };
+  }
+
   // Build context sections for analysis
   const sections: string[] = [];
 
@@ -1003,11 +1065,15 @@ async function analyzeWithHaiku(
       selected: 'direct',
       reasoning: 'No request or response data captured',
       values_applied: ['transparency'],
-      confidence: 'low',
     };
   }
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+
   try {
+    const systemPrompt = buildObserverSystemPrompt(card);
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -1017,8 +1083,8 @@ async function analyzeWithHaiku(
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1024,
-        system: [{ type: 'text', text: ANALYSIS_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        max_tokens: 512,
+        system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
         messages: [
           {
             role: 'user',
@@ -1026,6 +1092,7 @@ async function analyzeWithHaiku(
           },
         ],
       }),
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -1045,12 +1112,19 @@ async function analyzeWithHaiku(
       throw new Error('No JSON found in Haiku response');
     }
 
-    const analysis = JSON.parse(jsonMatch[0]) as HaikuAnalysis;
+    const analysis = JSON.parse(sanitizeJson(jsonMatch[0])) as HaikuAnalysis;
 
     // Validate required fields
     if (!analysis.alternatives || !analysis.selected || !analysis.reasoning) {
       throw new Error('Invalid analysis structure');
     }
+
+    // Post-parse validation: card-aware values_applied filtering
+    if (card?.values?.declared && card.values.declared.length > 0) {
+      const validValues = new Set(card.values.declared);
+      analysis.values_applied = analysis.values_applied.filter((v: string) => validValues.has(v));
+    }
+    // If no card or all filtered out, keep Haiku's inferred values as-is
 
     return analysis;
   } catch (error) {
@@ -1067,8 +1141,9 @@ async function analyzeWithHaiku(
       selected: 'analyzed',
       reasoning: fallbackReasoning,
       values_applied: ['transparency'],
-      confidence: 'low',
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -1634,6 +1709,11 @@ function buildTrace(
     },
   };
 
+  // Compute confidence deterministically from context richness
+  const confidence: number = context.thinking
+    ? (context.thinking.length > 500 ? 0.9 : 0.6)
+    : 0.3;
+
   // Build decision object per AAP SDK Decision interface
   const decision: Decision = {
     alternatives_considered: analysis.alternatives.map((a) => ({
@@ -1643,7 +1723,7 @@ function buildTrace(
     selected: analysis.selected,
     selection_reasoning: analysis.reasoning,
     values_applied: analysis.values_applied,
-    confidence: analysis.confidence === 'high' ? 0.9 : analysis.confidence === 'medium' ? 0.6 : 0.3,
+    confidence,
   };
 
   // Build escalation object per AAP SDK Escalation interface
@@ -1677,6 +1757,8 @@ function buildTrace(
         success: log.success,
         tool_count: context.toolCalls.length,
         result_summary: `${log.tokens_out} tokens generated in ${log.duration}ms`,
+        // Spread content classification flags for AAP SDK evaluateCondition()
+        ...(analysis.content_flags || {}),
       },
     },
   };
