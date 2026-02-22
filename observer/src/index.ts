@@ -327,8 +327,11 @@ async function processLog(
   // Submit usage event for admin tracking (non-blocking)
   ctx.waitUntil(submitUsageEvent(trace, log, env));
 
-  // Link gateway-created checkpoint to this trace (gateway handles all AIP analysis now)
-  ctx.waitUntil(linkCheckpointToTrace(agent_id, session_id, trace.trace_id, env));
+  // Link gateway-created checkpoint to this trace, then detect AIP/observer disagreements
+  ctx.waitUntil(
+    linkCheckpointToTrace(agent_id, session_id, trace.trace_id, env)
+      .then(() => detectDisagreement(agent_id, session_id, trace.trace_id, verification, env))
+  );
 
   // Check for behavioral drift (runs in background)
   ctx.waitUntil(checkForDrift(agent_id, card, env, otelExporter));
@@ -1379,6 +1382,422 @@ async function linkCheckpointToTrace(
   } catch (error) {
     // Fail-open: linking is best-effort
     console.warn('[observer] Failed to link checkpoint to trace:', error);
+  }
+}
+
+
+// ============================================================================
+// Disagreement-Driven Review (DDR)
+// ============================================================================
+
+const RECONCILIATION_SYSTEM_PROMPT = `You are a reconciliation analyst for an AI agent integrity system.
+
+Two independent systems assessed the same agent interaction:
+- **AIP** (Agent Integrity Protocol): Real-time analysis of the agent's thinking/reasoning
+- **AAP Observer**: Post-hoc verification of the agent's actions against its alignment card
+
+They disagree. Your job is to determine which system is correct and why.
+
+Analyze the evidence and return ONLY valid JSON:
+
+{
+  "outcome": "card_gap" | "aip_miss" | "observer_noise",
+  "reasoning": "2-3 sentence explanation",
+  "proposed_amendment": { "type": "bounded_action", "action": "semantic_capability_name", "description": "What this capability covers" }
+}
+
+Outcomes:
+- **card_gap**: The agent acted appropriately but its alignment card doesn't list this capability. The card needs updating. Propose a meaningful semantic capability name (NOT the raw tool name). Example: Instead of "process" → "analyze_content" with description "Text processing, cross-referencing, and fact-checking operations".
+- **aip_miss**: AIP incorrectly cleared the interaction. The observer caught a genuine concern that AIP's real-time analysis missed.
+- **observer_noise**: The observer flagged a false positive. AIP was correct that the interaction was fine. The action maps to an existing bounded capability or is clearly within the agent's mandate.
+
+Rules:
+- proposed_amendment is ONLY included for card_gap outcomes
+- Action names should be semantic capabilities, not raw tool/function names
+- Description should explain what class of operations this capability covers
+- Be precise in your reasoning — cite specific evidence from both assessments`;
+
+/**
+ * Detect disagreements between AIP checkpoint verdicts and AAP observer verification.
+ * When they disagree, creates a disagreement_review record and optionally runs reconciliation.
+ */
+async function detectDisagreement(
+  agentId: string,
+  sessionId: string,
+  traceId: string,
+  verification: VerificationResult | null,
+  env: Env
+): Promise<void> {
+  try {
+    // Skip if no verification result (no card = nothing to compare)
+    if (!verification) return;
+
+    // Query the most recent checkpoint for this agent+session (now linked to this trace)
+    const cpResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/integrity_checkpoints?agent_id=eq.${agentId}&session_id=eq.${sessionId}&linked_trace_id=eq.${traceId}&order=timestamp.desc&limit=1`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!cpResponse.ok) return;
+
+    const checkpoints = await cpResponse.json() as Array<{
+      checkpoint_id: string;
+      verdict: string;
+      reasoning_summary: string;
+      concerns: Record<string, unknown> | null;
+    }>;
+
+    if (!checkpoints || checkpoints.length === 0) return;
+
+    const checkpoint = checkpoints[0];
+
+    // Compare: AIP verdict vs observer verification
+    const aipClear = checkpoint.verdict === 'clear';
+    const observerClear = verification.verified;
+
+    // If they agree, no disagreement to detect
+    if (aipClear === observerClear) return;
+
+    console.log(`[observer/ddr] Disagreement detected: AIP=${checkpoint.verdict}, observer verified=${verification.verified} for agent ${agentId}`);
+
+    // Fetch quota context to check feature flags and DDR mode
+    const quotaResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/rpc/get_quota_context_for_agent`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ p_agent_id: agentId }),
+      }
+    );
+
+    if (!quotaResponse.ok) return;
+
+    const quota = await quotaResponse.json() as {
+      feature_flags: Record<string, boolean>;
+      agent_settings: { ddr_mode: string } | null;
+    };
+
+    const reconciliationEnabled = quota.feature_flags?.reconciliation === true;
+    const ddrMode = quota.agent_settings?.ddr_mode || 'flag';
+
+    if (!reconciliationEnabled || ddrMode === 'off') return;
+
+    // INSERT disagreement review (idempotent via unique constraint)
+    const reviewId = `ddr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const insertResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/disagreement_reviews`,
+      {
+        method: 'POST',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({
+          id: reviewId,
+          agent_id: agentId,
+          checkpoint_id: checkpoint.checkpoint_id,
+          trace_id: traceId,
+          aip_verdict: checkpoint.verdict,
+          observer_outcome: verification.verified ? 'clear' : 'violation',
+          status: 'pending',
+        }),
+      }
+    );
+
+    if (!insertResponse.ok) {
+      const errorText = await insertResponse.text();
+      // Unique constraint violation = already exists, idempotent
+      if (errorText.includes('duplicate') || errorText.includes('unique') || errorText.includes('23505')) {
+        console.log('[observer/ddr] Disagreement review already exists, skipping');
+        return;
+      }
+      console.warn(`[observer/ddr] Failed to insert review: ${insertResponse.status} - ${errorText}`);
+      return;
+    }
+
+    console.log(`[observer/ddr] Created disagreement review ${reviewId}`);
+
+    // If mode supports reconciliation, run it
+    if (ddrMode === 'auto-suggest' || ddrMode === 'auto-apply') {
+      await runReconciliation(reviewId, agentId, checkpoint, traceId, verification, ddrMode, env);
+    }
+  } catch (error) {
+    // Fail-open: DDR is best-effort
+    console.warn('[observer/ddr] Disagreement detection failed:', error);
+  }
+}
+
+/**
+ * Run Sonnet-powered reconciliation analysis on a disagreement.
+ * Determines whether the disagreement is a card gap, AIP miss, or observer noise.
+ */
+async function runReconciliation(
+  reviewId: string,
+  agentId: string,
+  checkpoint: { checkpoint_id: string; verdict: string; reasoning_summary: string; concerns: Record<string, unknown> | null },
+  traceId: string,
+  verification: VerificationResult,
+  ddrMode: string,
+  env: Env
+): Promise<void> {
+  const startTime = Date.now();
+
+  try {
+    // Mark as analyzing
+    await fetch(
+      `${env.SUPABASE_URL}/rest/v1/disagreement_reviews?id=eq.${reviewId}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({ status: 'analyzing' }),
+      }
+    );
+
+    // Fetch the trace for action/decision details
+    const traceResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/traces?trace_id=eq.${traceId}&limit=1`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    type TraceRecord = { action?: Record<string, unknown>; decision?: Record<string, unknown>; verification?: Record<string, unknown> };
+    let traceData: TraceRecord | null = null;
+    if (traceResponse.ok) {
+      const traces = await traceResponse.json() as Array<Record<string, unknown>>;
+      if (traces.length > 0) {
+        traceData = traces[0] as TraceRecord;
+      }
+    }
+
+    // Fetch the alignment card
+    const cardResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    let cardJson: Record<string, unknown> | null = null;
+    if (cardResponse.ok) {
+      const cards = await cardResponse.json() as Array<{ card_json: Record<string, unknown> }>;
+      if (cards.length > 0) {
+        cardJson = cards[0].card_json;
+      }
+    }
+
+    // Build sections for Sonnet analysis
+    const sections: string[] = [];
+
+    sections.push(`<aip_assessment>
+Verdict: ${checkpoint.verdict}
+Reasoning: ${checkpoint.reasoning_summary || 'N/A'}
+Concerns: ${checkpoint.concerns ? JSON.stringify(checkpoint.concerns) : 'None'}
+</aip_assessment>`);
+
+    if (traceData) {
+      sections.push(`<observer_assessment>
+Action: ${JSON.stringify(traceData.action || {})}
+Decision Reasoning: ${(traceData.decision as Record<string, unknown>)?.selection_reasoning || 'N/A'}
+Violations: ${JSON.stringify((traceData.verification as Record<string, unknown>)?.violations || verification.violations || [])}
+</observer_assessment>`);
+    }
+
+    if (cardJson) {
+      sections.push(`<alignment_card>
+${JSON.stringify(cardJson, null, 2)}
+</alignment_card>`);
+    }
+
+    // Call Sonnet for reconciliation
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1024,
+          system: [{ type: 'text', text: RECONCILIATION_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+          messages: [
+            {
+              role: 'user',
+              content: sections.join('\n\n'),
+            },
+          ],
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Sonnet API error: ${response.status}`);
+      }
+
+      const data = await response.json() as {
+        content: Array<{ type: string; text: string }>;
+      };
+
+      const text = data.content[0]?.text || '';
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON found in Sonnet response');
+      }
+
+      const result = JSON.parse(jsonMatch[0]) as {
+        outcome: 'card_gap' | 'aip_miss' | 'observer_noise';
+        reasoning: string;
+        proposed_amendment?: { type: string; action: string; description: string };
+      };
+
+      const durationMs = Date.now() - startTime;
+
+      // Determine final status based on outcome and mode
+      let finalStatus: string;
+      if (result.outcome === 'observer_noise') {
+        finalStatus = 'dismissed';
+      } else if (result.outcome === 'card_gap' && ddrMode === 'auto-apply') {
+        finalStatus = 'applied';
+      } else {
+        finalStatus = 'review';
+      }
+
+      // Update the review with reconciliation results
+      await fetch(
+        `${env.SUPABASE_URL}/rest/v1/disagreement_reviews?id=eq.${reviewId}`,
+        {
+          method: 'PATCH',
+          headers: {
+            apikey: env.SUPABASE_KEY,
+            Authorization: `Bearer ${env.SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          },
+          body: JSON.stringify({
+            reconciliation_outcome: result.outcome,
+            reconciliation_reasoning: result.reasoning,
+            reconciliation_model: 'claude-sonnet-4-20250514',
+            reconciliation_duration_ms: durationMs,
+            proposed_amendment: result.proposed_amendment || null,
+            status: finalStatus,
+            ...(finalStatus === 'dismissed' || finalStatus === 'applied' ? {
+              resolved_by: 'system/ddr',
+              resolved_at: new Date().toISOString(),
+            } : {}),
+          }),
+        }
+      );
+
+      console.log(`[observer/ddr] Reconciliation complete: ${result.outcome} (${durationMs}ms)`);
+
+      // Auto-apply card amendment if mode is auto-apply and outcome is card_gap
+      if (result.outcome === 'card_gap' && ddrMode === 'auto-apply' && result.proposed_amendment) {
+        await applyCardAmendment(agentId, result.proposed_amendment, env);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (error) {
+    // Fail-open: update review back to pending on failure
+    console.warn('[observer/ddr] Reconciliation failed:', error);
+    await fetch(
+      `${env.SUPABASE_URL}/rest/v1/disagreement_reviews?id=eq.${reviewId}`,
+      {
+        method: 'PATCH',
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({ status: 'review' }),
+      }
+    );
+  }
+}
+
+/**
+ * Apply a proposed card amendment from DDR reconciliation.
+ * Adds the proposed action to the alignment card's bounded_actions.
+ */
+async function applyCardAmendment(
+  agentId: string,
+  amendment: { type: string; action: string; description: string },
+  env: Env
+): Promise<void> {
+  try {
+    const cardResponse = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/alignment_cards?agent_id=eq.${agentId}&is_active=eq.true&limit=1`,
+      {
+        headers: {
+          apikey: env.SUPABASE_KEY,
+          Authorization: `Bearer ${env.SUPABASE_KEY}`,
+        },
+      }
+    );
+
+    if (!cardResponse.ok) return;
+
+    const cards = await cardResponse.json() as Array<{ id: string; card_json: Record<string, any> }>;
+    if (!cards || cards.length === 0) return;
+
+    const card = cards[0];
+    const cardJson = card.card_json;
+    const cardId = card.id;
+
+    const currentBounded: string[] = cardJson.autonomy_envelope?.bounded_actions || [];
+
+    if (!currentBounded.includes(amendment.action)) {
+      currentBounded.push(amendment.action);
+      if (!cardJson.autonomy_envelope) {
+        cardJson.autonomy_envelope = {};
+      }
+      cardJson.autonomy_envelope.bounded_actions = currentBounded;
+
+      await fetch(
+        `${env.SUPABASE_URL}/rest/v1/alignment_cards?id=eq.${cardId}`,
+        {
+          method: 'PATCH',
+          headers: {
+            apikey: env.SUPABASE_KEY,
+            Authorization: `Bearer ${env.SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ card_json: cardJson, issued_at: new Date().toISOString() }),
+        }
+      );
+
+      console.log(`[observer/ddr] Auto-applied card amendment: ${amendment.action} for agent ${agentId}`);
+    }
+  } catch (error) {
+    console.warn('[observer/ddr] Failed to apply card amendment:', error);
   }
 }
 
