@@ -309,13 +309,44 @@ mod base64_engine {
     pub use base64::Engine;
 }
 
+/// Row returned by the updated get_pending_proofs function.
+#[derive(sqlx::FromRow)]
+struct PendingProof {
+    proof_id: String,
+    #[allow(dead_code)]
+    checkpoint_id: String,
+    retry_count: i32,
+    #[allow(dead_code)]
+    created_at: chrono::DateTime<chrono::Utc>,
+    analysis_json: Option<String>,
+    thinking_hash: Option<String>,
+    card_hash: Option<String>,
+    values_hash: Option<String>,
+    model: Option<String>,
+}
+
 /// Background retry loop for pending proofs.
+///
+/// Every 30 seconds, fetches pending proofs that have stored input data
+/// and spawns proving tasks for them — the same logic as handle_prove.
 pub async fn retry_loop(db: PgPool) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
 
-        let pending = sqlx::query_as::<_, (String, String, i32)>(
-            "SELECT proof_id, checkpoint_id, retry_count FROM get_pending_proofs(10)"
+        // Self-ping: make an HTTP request to our own health endpoint so
+        // Fly.io sees sustained HTTP activity and doesn't auto-stop us.
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+        if let Ok(mut stream) = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+            use tokio::io::AsyncWriteExt;
+            let _ = stream.write_all(
+                format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", port).as_bytes()
+            ).await;
+        }
+
+        let pending = sqlx::query_as::<_, PendingProof>(
+            "SELECT proof_id, checkpoint_id, retry_count, created_at, \
+                    analysis_json, thinking_hash, card_hash, values_hash, model \
+             FROM get_pending_proofs(5)"
         )
         .fetch_all(&db)
         .await;
@@ -323,13 +354,99 @@ pub async fn retry_loop(db: PgPool) {
         match pending {
             Ok(rows) if !rows.is_empty() => {
                 info!(count = rows.len(), "Retrying pending proofs");
-                for (proof_id, _checkpoint_id, retry_count) in rows {
-                    warn!(proof_id = %proof_id, retry_count = retry_count, "Proof needs retry — will be picked up by next request");
-                    // Mark as pending to be retried on next request
-                    let _ = sqlx::query("UPDATE verdict_proofs SET status = 'pending', updated_at = now() WHERE proof_id = $1")
-                        .bind(&proof_id)
-                        .execute(&db)
-                        .await;
+                for row in rows {
+                    let analysis_json = match row.analysis_json {
+                        Some(v) if !v.is_empty() => v,
+                        _ => {
+                            warn!(proof_id = %row.proof_id, "Skipping retry: missing analysis_json");
+                            continue;
+                        }
+                    };
+                    let thinking_hash = row.thinking_hash.unwrap_or_default();
+                    let card_hash = row.card_hash.unwrap_or_default();
+                    let values_hash = row.values_hash.unwrap_or_default();
+                    let model = row.model.unwrap_or_else(|| "unknown".to_string());
+
+                    info!(proof_id = %row.proof_id, retry_count = row.retry_count, "Spawning retry proof");
+
+                    // Mark as proving
+                    let _ = sqlx::query(
+                        "UPDATE verdict_proofs SET status = 'proving', updated_at = now() WHERE proof_id = $1"
+                    )
+                    .bind(&row.proof_id)
+                    .execute(&db)
+                    .await;
+
+                    // Spawn proving task (same logic as handle_prove)
+                    let db_clone = db.clone();
+                    let proof_id = row.proof_id.clone();
+                    tokio::spawn(async move {
+                        let start = std::time::Instant::now();
+
+                        match prover::prove_verdict_derivation(
+                            &analysis_json,
+                            &thinking_hash,
+                            &card_hash,
+                            &values_hash,
+                            &model,
+                        ) {
+                            Ok((receipt, output)) => {
+                                let duration_ms = start.elapsed().as_millis() as i32;
+                                let receipt_bytes = match prover::receipt_to_bytes(&receipt) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        error!(proof_id = %proof_id, "Failed to serialize receipt: {}", e);
+                                        let _ = sqlx::query("SELECT fail_proof($1, $2)")
+                                            .bind(&proof_id)
+                                            .bind(format!("Receipt serialization failed: {}", e))
+                                            .execute(&db_clone)
+                                            .await;
+                                        return;
+                                    }
+                                };
+
+                                let journal_bytes = receipt.journal.bytes.clone();
+                                let verdict_str = serde_json::to_string(&output.verdict).unwrap_or_default();
+                                let image_id_hex: String = aip_zkvm_methods::AIP_ZKVM_GUEST_ID
+                                    .iter()
+                                    .flat_map(|w| w.to_le_bytes())
+                                    .map(|b| format!("{:02x}", b))
+                                    .collect();
+
+                                let verified = prover::verify_verdict_proof(&receipt).is_ok();
+
+                                info!(
+                                    proof_id = %proof_id,
+                                    verdict = %verdict_str,
+                                    duration_ms = duration_ms,
+                                    verified = verified,
+                                    "Retry proof completed"
+                                );
+
+                                let _ = sqlx::query(
+                                    "SELECT complete_proof($1, $2, $3, $4, $5, $6::numeric, $7, $8)"
+                                )
+                                .bind(&proof_id)
+                                .bind(&image_id_hex)
+                                .bind(&receipt_bytes)
+                                .bind(&journal_bytes)
+                                .bind(duration_ms)
+                                .bind(0.005f64)
+                                .bind(verified)
+                                .bind(if verified { Some(chrono::Utc::now()) } else { None })
+                                .execute(&db_clone)
+                                .await;
+                            }
+                            Err(e) => {
+                                error!(proof_id = %proof_id, "Retry proving failed: {}", e);
+                                let _ = sqlx::query("SELECT fail_proof($1, $2)")
+                                    .bind(&proof_id)
+                                    .bind(format!("Proving failed: {}", e))
+                                    .execute(&db_clone)
+                                    .await;
+                            }
+                        }
+                    });
                 }
             }
             Ok(_) => {} // No pending proofs

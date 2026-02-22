@@ -1129,6 +1129,11 @@ async function requestProof(
         checkpoint_id: checkpointId,
         proof_type: 'risc-zero-stark',
         status: 'pending',
+        analysis_json: checkpointData.analysis_response_text || '',
+        thinking_hash: checkpointData.thinking_block_hash,
+        card_hash: checkpointData.card_hash || '',
+        values_hash: checkpointData.values_hash || '',
+        model: checkpointData.model,
       }),
     });
     if (!res.ok) return;
