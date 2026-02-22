@@ -2204,10 +2204,26 @@ function buildTrace(
   };
 
   // Build escalation object per AAP SDK Escalation interface
+  // Evaluate card's escalation triggers against content_flags to avoid false "missed_escalation" violations.
+  // The AAP SDK's verifyTrace checks: if condition matches AND required=false → violation.
+  // We must set required=true when the observer's own content flags would match.
+  let escalationRequired = false;
+  let escalationReason = 'No escalation triggers matched';
+  if (card?.autonomy_envelope?.escalation_triggers && analysis.content_flags) {
+    for (const trigger of card.autonomy_envelope.escalation_triggers) {
+      const condition = trigger.condition;
+      if (condition && /^\w+$/.test(condition) && analysis.content_flags[condition]) {
+        escalationRequired = true;
+        escalationReason = trigger.reason || `Trigger '${condition}' matched`;
+        break;
+      }
+    }
+  }
+
   const escalation: Escalation = {
     evaluated: true,
-    required: false,
-    reason: 'No escalation triggers matched',
+    required: escalationRequired,
+    reason: escalationReason,
   };
 
   // Build the complete APTrace object (matches SDK exactly)
